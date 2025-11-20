@@ -1,11 +1,15 @@
+import logging
 import typing as t
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
+from uuid import uuid4
 
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer, GenerationConfig
 
 from pivotal_tokens.oracle import Oracle
+from pivotal_tokens.dict_repo import DictRepo
 
 
 @dataclass
@@ -21,7 +25,8 @@ class PivotalSpanExtractor(ABC):
                 system_prompt: str,
                 user_prompt: str,
                 actual_answer: str,
-                expected_answer: str) -> list[PivotalSpan]:
+                expected_answer: str,
+                metadata: dict[str, t.Any] | None = None) -> list[PivotalSpan]:
         """
         Extracts pivotal token from the reasoning trace.
 
@@ -30,6 +35,7 @@ class PivotalSpanExtractor(ABC):
         :param user_prompt: User prompt.
         :param actual_answer: Answer after end-of-thinking token, e.g. </think>.
         :param expected_answer: Ground truth answer.
+        :param metadata: Additional metadata, e.g. sample ID or extraction trial.
         :return: List of extracted pivotal tokens.
         """
 
@@ -46,10 +52,14 @@ class SuccessProbabilityShiftSpan(PivotalSpan):
 
 
 class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
+    REPO_NAME_SUCCESS_PROB_ESTIMATION_TRIALS = "trials"
+    REPO_NAME_SUBDIVIDE_SEQUENCE = "subdivided_sequences"
+
     def __init__(self,
                  model: PreTrainedModel,
                  tokenizer: PreTrainedTokenizer,
                  oracle: Oracle,
+                 repo: DictRepo,
                  prob_threshold: float,
                  num_trials: int,
                  min_prob: float,
@@ -59,6 +69,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
         self.model = model
         self.tokenizer = tokenizer
         self.oracle = oracle
+        self.repo = repo
         self.prob_threshold = prob_threshold
         self.num_trials = num_trials
         self.min_prob = min_prob
@@ -80,14 +91,10 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
 
         prompts = [{"role": "system", "content": system_prompt},
                    {"role": "user", "content": user_prompt}]
-        context = self.tokenizer.apply_chat_template(
-            prompts,
-            tokenize=False,
-            add_generation_prompt=True
-            # FIXME:
-            #  1. Enable generation with a separate parameter
-            #  2. Double check prompt tokens in the output and PAD tokens
-        )
+        context = self.tokenizer.apply_chat_template(conversation=prompts,
+                                                     tokenize=False,
+                                                     add_generation_prompt=True,
+                                                     enable_thinking=True)
         context += prefix
 
         tokenized = self.tokenizer(context, return_tensors="pt", padding=True)
@@ -97,6 +104,16 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
         # Generate completions in batches
         success_count = 0
         remaining_trials = self.num_trials
+
+        dump_data = {
+            "prefix": prefix,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "context": context,
+            "expected_answer": expected_answer,
+            "cache_key": cache_key,
+            "metadata": metadata
+        }
 
         while remaining_trials > 0:
             current_batch_size = min(self.batch_size, remaining_trials)
@@ -111,16 +128,25 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                 )
 
             # Check success for each completion
-            for seq in outputs.sequences:
-                # FIXME: double check decoded text and special tokens
+            for trial_num, seq in enumerate(outputs.sequences):
+                # TODO: double check decoded text and special tokens
                 completion = self.tokenizer.decode(seq[input_ids.shape[1]:], skip_special_tokens=True)
-                success = self.oracle.verify(actual=completion, expected=expected_answer)
+                is_success = self.oracle.verify(actual=completion, expected=expected_answer)
 
-                # TODO: store each completion, full response, success flag (try event-based approach like in f2).
-                #  See: https://github.com/riga/pymitter
-                #  See: `metadata` with `query_id` or other params
+                trial_id = uuid4()
+                trial_dump_data = {
+                    "trial_id": trial_id,
+                    "trial_num": trial_num,
+                    "timestamp": datetime.now().isoformat(),
+                    "is_success": is_success,
+                    **dump_data
+                }
 
-                if success:
+                self.repo.save(key=trial_id,
+                               data=trial_dump_data,
+                               name=self.REPO_NAME_SUCCESS_PROB_ESTIMATION_TRIALS)
+
+                if is_success:
                     success_count += 1
 
             remaining_trials -= current_batch_size
@@ -129,6 +155,13 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
         self.prob_cache[cache_key] = success_prob
 
         return success_prob
+
+    def split_sequence(self, sequence: list[int]) -> tuple[list[int], list[list[int]]]:
+        mid = len(sequence) // 2
+        left = sequence[:mid]
+        right = sequence[mid:]
+
+        return left, right
 
     def subdivide_sequence(self,
                            sequence: list[int],
@@ -158,14 +191,30 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                                                         expected_answer=expected_answer,
                                                         metadata=metadata)
 
+        subdivide_id = uuid4()
+        sequence_str = self.tokenizer.decode(sequence, skip_special_tokens=False)
+        dump_data = {
+            "subdivide_id": subdivide_id,
+            "timestamp": datetime.now().isoformat(),
+            "prob_before": prob_before,
+            "prob_after": prob_after,
+            "prefix": prefix_str,
+            "full_seq": full_seq_str,
+            "sequence": sequence_str,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "expected_answer": expected_answer,
+            "metadata": metadata
+        }
+        self.repo.save(key=subdivide_id,
+                       data=dump_data,
+                       name=self.REPO_NAME_SUBDIVIDE_SEQUENCE)
+
         # Base case 2: No significant change in probability
         if abs(prob_after - prob_before) < self.prob_threshold:
             return [sequence]
 
-        # Split the sequence for recursive processing
-        mid = len(sequence) // 2
-        left = sequence[:mid]
-        right = sequence[mid:]
+        left, right = self.split_sequence(sequence=sequence)
 
         # Recursively subdivide left side
         left_segments = self.subdivide_sequence(sequence=left,
@@ -194,16 +243,22 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                 system_prompt: str,
                 user_prompt: str,
                 actual_answer: str,
-                expected_answer: str) -> list[SuccessProbabilityShiftSpan]:
-        metadata = {}
+                expected_answer: str,
+                metadata: dict[str, t.Any] | None = None,
+                min_prob: float = 0.0,
+                max_prob: float = 1.0,) -> list[SuccessProbabilityShiftSpan]:
+        metadata = metadata or {}
         init_prob = self.estimate_success_probability(prefix="",
                                                       system_prompt=system_prompt,
                                                       user_prompt=user_prompt,
                                                       expected_answer=expected_answer,
                                                       metadata=metadata)
+        if min_prob <= init_prob <= max_prob:
+            logging.info(f"Initial probability: {init_prob} ∉ [{min_prob}], {max_prob}]")
+            return []
+
         # Subdivide the sequence to find pivotal tokens
-        # TODO: check method signature and fix the `encode` call, then convert to python list
-        sequence = self.tokenizer.encode(reasoning_trace)
+        sequence = self.tokenizer.encode(reasoning_trace, add_special_tokens=False)
         subdivided = self.subdivide_sequence(prefix=[],
                                              sequence=sequence,
                                              system_prompt=system_prompt,
@@ -216,10 +271,8 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
         context = self.tokenizer.apply_chat_template(
             prompts,
             tokenize=False,
-            add_generation_prompt=True
-            # FIXME:
-            #  1. Enable generation with a separate parameter
-            #  2. Double check prompt tokens in the output and PAD tokens
+            add_generation_prompt=True,
+            enable_thinking=True
         )
 
         tokenized = self.tokenizer(context, return_tensors="pt", padding=True)
@@ -273,5 +326,6 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
                 system_prompt: str,
                 user_prompt: str,
                 actual_answer: str,
-                expected_answer: str) -> list[LogLikelihoodSpikeSpan]:
+                expected_answer: str,
+                metadata: dict[str, t.Any] | None = None) -> list[LogLikelihoodSpikeSpan]:
         pass

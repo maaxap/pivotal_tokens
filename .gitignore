@@ -10,6 +10,7 @@ wheels/
 .venv
 
 .idea
+.cache
 
 data/
 notebooks/**/data/
