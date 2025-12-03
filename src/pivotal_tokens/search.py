@@ -1,7 +1,7 @@
 import logging
 import typing as t
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from uuid import uuid4
 
@@ -53,7 +53,8 @@ class SuccessProbabilityShiftSpan(PivotalSpan):
 
 class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
     REPO_NAME_SUCCESS_PROB_ESTIMATION_TRIALS = "trials"
-    REPO_NAME_SUBDIVIDE_SEQUENCE = "subdivided_sequences"
+    REPO_NAME_SUBDIVIDED_SEQUENCE = "subdivided_sequences"
+    REPO_NAME_SPANS = "spans"
 
     def __init__(self,
                  model: PreTrainedModel,
@@ -66,6 +67,15 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                  max_prob: float,
                  batch_size: int,
                  generation_config: GenerationConfig):
+        if min_prob < 0.0 or max_prob > 1.0:
+            raise ValueError("min_prob and max_prob must be in [0, 1] range")
+        
+        if min_prob >= max_prob:
+            raise ValueError("min_prob must be less than max_prob")
+        
+        if not (0.0 <= prob_threshold <= 1.0):
+            raise ValueError("prob_threshold must be in [0, 1] range")
+
         self.model = model
         self.tokenizer = tokenizer
         self.oracle = oracle
@@ -79,22 +89,30 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
 
         self.prob_cache = {}
 
+    def clear_cache(self):
+        self.prob_cache = {}
+
+    def create_context(self, system_prompt: str, user_prompt: str) -> str:
+        prompts = [{"role": "system", "content": system_prompt},
+                   {"role": "user", "content": user_prompt}]
+        context = self.tokenizer.apply_chat_template(prompts,
+                                                     tokenize=False,
+                                                     add_generation_prompt=True,
+                                                     enable_thinking=True)
+        return context
+
     def estimate_success_probability(self,
                                      prefix: str,
                                      system_prompt: str,
                                      user_prompt: str,
                                      expected_answer: str,
                                      metadata: dict[str, t.Any] = None):
+        # TODO: Cache key doesn't include generation_config parameters which can affect results
         cache_key = (prefix, system_prompt, user_prompt, self.num_trials, expected_answer)
         if cache_key in self.prob_cache:
             return self.prob_cache[cache_key]
 
-        prompts = [{"role": "system", "content": system_prompt},
-                   {"role": "user", "content": user_prompt}]
-        context = self.tokenizer.apply_chat_template(conversation=prompts,
-                                                     tokenize=False,
-                                                     add_generation_prompt=True,
-                                                     enable_thinking=True)
+        context = self.create_context(system_prompt=system_prompt, user_prompt=user_prompt)
         context += prefix
 
         tokenized = self.tokenizer(context, return_tensors="pt", padding=True)
@@ -128,10 +146,10 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                 )
 
             # Check success for each completion
-            for trial_num, seq in enumerate(outputs.sequences):
+            for trial_num, sequence in enumerate(outputs.sequences):
                 # TODO: double check decoded text and special tokens
-                completion = self.tokenizer.decode(seq[input_ids.shape[1]:], skip_special_tokens=True)
-                is_success = self.oracle.verify(actual=completion, expected=expected_answer)
+                completion = self.tokenizer.decode(sequence[input_ids.shape[1]:], skip_special_tokens=True)
+                is_success = self.oracle.verify(actual=completion, expected=[expected_answer])
 
                 trial_id = uuid4()
                 trial_dump_data = {
@@ -156,7 +174,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
 
         return success_prob
 
-    def split_sequence(self, sequence: list[int]) -> tuple[list[int], list[list[int]]]:
+    def split_sequence(self, sequence: list[int]) -> tuple[list[int], list[int]]:
         mid = len(sequence) // 2
         left = sequence[:mid]
         right = sequence[mid:]
@@ -180,6 +198,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
         prefix_str = self.tokenizer.decode(prefix, skip_special_tokens=False)
         full_seq_str = self.tokenizer.decode(prefix + sequence, skip_special_tokens=False)
 
+
         prob_before = self.estimate_success_probability(prefix=prefix_str,
                                                         system_prompt=system_prompt,
                                                         user_prompt=user_prompt,
@@ -201,14 +220,16 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
             "prefix": prefix_str,
             "full_seq": full_seq_str,
             "sequence": sequence_str,
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
             "expected_answer": expected_answer,
-            "metadata": metadata
+            "metadata": metadata,
+
+            # TODO: Large dump_data objects with full prompts repeated at every recursion level - memory intensive
+            # "system_prompt": system_prompt,
+            # "user_prompt": user_prompt,
         }
         self.repo.save(key=subdivide_id,
                        data=dump_data,
-                       name=self.REPO_NAME_SUBDIVIDE_SEQUENCE)
+                       name=self.REPO_NAME_SUBDIVIDED_SEQUENCE)
 
         # Base case 2: No significant change in probability
         if abs(prob_after - prob_before) < self.prob_threshold:
@@ -244,17 +265,20 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                 user_prompt: str,
                 actual_answer: str,
                 expected_answer: str,
-                metadata: dict[str, t.Any] | None = None,
-                min_prob: float = 0.0,
-                max_prob: float = 1.0,) -> list[SuccessProbabilityShiftSpan]:
+                metadata: dict[str, t.Any] | None = None) -> list[SuccessProbabilityShiftSpan]:
+        del actual_answer  # Not used in this extractor
+
+        if reasoning_trace.strip() == "":
+            raise ValueError("Reasoning trace is empty")
+
         metadata = metadata or {}
         init_prob = self.estimate_success_probability(prefix="",
                                                       system_prompt=system_prompt,
                                                       user_prompt=user_prompt,
                                                       expected_answer=expected_answer,
                                                       metadata=metadata)
-        if min_prob <= init_prob <= max_prob:
-            logging.info(f"Initial probability: {init_prob} ∉ [{min_prob}], {max_prob}]")
+        if not (self.min_prob <= init_prob <= self.max_prob):
+            logging.info(f"Initial probability {init_prob} must be in [{self.min_prob}], {self.max_prob}]")
             return []
 
         # Subdivide the sequence to find pivotal tokens
@@ -266,14 +290,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                                              expected_answer=expected_answer,
                                              metadata=metadata)
 
-        prompts = [{"role": "system", "content": system_prompt},
-                   {"role": "user", "content": user_prompt}]
-        context = self.tokenizer.apply_chat_template(
-            prompts,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=True
-        )
+        context = self.create_context(system_prompt=system_prompt, user_prompt=user_prompt)
 
         tokenized = self.tokenizer(context, return_tensors="pt", padding=True)
         tokenized_context = tokenized.input_ids[0].tolist()
@@ -285,7 +302,6 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                 continue
 
             span_text = self.tokenizer.decode(span, skip_special_tokens=False)
-
 
             current_context = self.tokenizer.decode(tokenized_context, skip_special_tokens=False)
             prob_before = self.estimate_success_probability(prefix=current_context,
@@ -309,6 +325,13 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                                                        prob_delta=prob_delta,
                                                        pivotal_context=current_context,
                                                        metadata=metadata)
+            span_id = uuid4()
+            span_dump_data = asdict(pivotal_span)
+
+            self.repo.save(key=span_id,
+                           data=span_dump_data,
+                           name=self.REPO_NAME_SPANS)
+
             pivotal_spans.append(pivotal_span)
             tokenized_context = tokenized_context + span
 

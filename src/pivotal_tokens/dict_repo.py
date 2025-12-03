@@ -11,16 +11,13 @@ class DictRepo:
     def _make_filename(self, key: str) -> str:
         return f"{key}.json"
 
-    def save(self, key: str, data: dict[str, t.Any], name: str, overwrite: bool = False) -> None:
+    def save(self, key: str, data: dict[str, t.Any], name: str) -> None:
         """Save dict to disk with given key"""
         filepath = self.dirpath / name / self._make_filename(key)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
         if filepath.is_file():
-            logging.warning(f"File {filepath} already exists")
-
-            if not overwrite:
-                return
+            raise RuntimeError(f"File {filepath} already exists")
 
         dumped = json.dumps(data)
         filepath.write_text(dumped)
