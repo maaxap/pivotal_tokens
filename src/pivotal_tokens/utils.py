@@ -1,10 +1,29 @@
 import logging
 import re
 
+from pathlib import Path
+
 
 def setup_logger(level: int = logging.INFO) -> None:
     logging.basicConfig(level=level,
                         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+
+def get_project_root_dir() -> Path:
+    project_root = Path(__file__).parent.parent
+    return project_root.resolve()
+
+
+def get_data_dir() -> Path:
+    data_dir = get_project_root_dir() / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+def get_hf_cache_dir() -> Path:
+    hf_cache_dir = get_project_root_dir() / ".cache" / "huggingface"
+    hf_cache_dir.mkdir(parents=True, exist_ok=True)
+    return hf_cache_dir
 
 
 def normalize_text(text: str) -> str:
