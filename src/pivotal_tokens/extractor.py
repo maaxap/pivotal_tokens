@@ -3,13 +3,17 @@ import typing as t
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from uuid import uuid4
 
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer, GenerationConfig
 
 from pivotal_tokens.oracle import Oracle
-from pivotal_tokens.dict_repo import DictRepo
+from pivotal_tokens.repo import Repo, SampleRepo
+from pivotal_tokens.utils import generate_unique_id
+
+
+THINKING_START_TOKEN = "<think>"
+THINKING_END_TOKEN = "</think>"
 
 
 @dataclass
@@ -21,6 +25,7 @@ class PivotalSpan:
 class PivotalSpanExtractor(ABC):
     @abstractmethod
     def extract(self,
+                sample_id: str,
                 reasoning_trace: str,
                 system_prompt: str,
                 user_prompt: str,
@@ -30,6 +35,7 @@ class PivotalSpanExtractor(ABC):
         """
         Extracts pivotal token from the reasoning trace.
 
+        :param sample_id: Sample ID.
         :param reasoning_trace: Reasoning trace.
         :param system_prompt: System prompt.
         :param user_prompt: User prompt.
@@ -52,15 +58,11 @@ class SuccessProbabilityShiftSpan(PivotalSpan):
 
 
 class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
-    REPO_NAME_SUCCESS_PROB_ESTIMATION_TRIALS = "trials"
-    REPO_NAME_SUBDIVIDED_SEQUENCE = "subdivided_sequences"
-    REPO_NAME_SPANS = "spans"
-
     def __init__(self,
                  model: PreTrainedModel,
                  tokenizer: PreTrainedTokenizer,
                  oracle: Oracle,
-                 repo: DictRepo,
+                 base_repo: Repo,
                  prob_threshold: float,
                  num_trials: int,
                  min_prob: float,
@@ -69,17 +71,21 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                  generation_config: GenerationConfig):
         if min_prob < 0.0 or max_prob > 1.0:
             raise ValueError("min_prob and max_prob must be in [0, 1] range")
-        
+
         if min_prob >= max_prob:
             raise ValueError("min_prob must be less than max_prob")
-        
+
         if not (0.0 <= prob_threshold <= 1.0):
             raise ValueError("prob_threshold must be in [0, 1] range")
+
+        vocab_keys = tokenizer.get_vocab().keys()
+        if THINKING_START_TOKEN not in vocab_keys or THINKING_END_TOKEN not in vocab_keys:
+            raise ValueError(f"Tokenizer must support special thinking tokens: {THINKING_START_TOKEN}, {THINKING_END_TOKEN}")
 
         self.model = model
         self.tokenizer = tokenizer
         self.oracle = oracle
-        self.repo = repo
+        self.base_repo = base_repo
         self.prob_threshold = prob_threshold
         self.num_trials = num_trials
         self.min_prob = min_prob
@@ -106,11 +112,17 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                                      system_prompt: str,
                                      user_prompt: str,
                                      expected_answer: str,
-                                     metadata: dict[str, t.Any] = None):
+                                     sample_repo: SampleRepo,
+                                     metadata: dict[str, t.Any] | None = None) -> float:
         # TODO: Cache key doesn't include generation_config parameters which can affect results
         cache_key = (prefix, system_prompt, user_prompt, self.num_trials, expected_answer)
         if cache_key in self.prob_cache:
+            logging.debug(f"Using cached probability for key: {cache_key}")
             return self.prob_cache[cache_key]
+
+        logging.debug(f"Estimating success probability for key: {cache_key}")
+        
+        metadata = metadata or {}
 
         context = self.create_context(system_prompt=system_prompt, user_prompt=user_prompt)
         context += prefix
@@ -123,49 +135,46 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
         success_count = 0
         remaining_trials = self.num_trials
 
-        dump_data = {
-            "prefix": prefix,
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
-            "context": context,
-            "expected_answer": expected_answer,
-            "cache_key": cache_key,
-            "metadata": metadata
-        }
-
+        trial_num = 0
         while remaining_trials > 0:
             current_batch_size = min(self.batch_size, remaining_trials)
 
             # Generate completions
             with torch.no_grad():
-                outputs = self.model.generate(
-                    input_ids,
-                    attention_mask=attention_mask,
-                    generation_config=self.generation_config,
-                    return_dict_in_generate=True
-                )
+                outputs = self.model.generate(input_ids,
+                                              attention_mask=attention_mask,
+                                              generation_config=self.generation_config,
+                                              return_dict_in_generate=True,
+                                              num_return_sequences=current_batch_size)
 
             # Check success for each completion
-            for trial_num, sequence in enumerate(outputs.sequences):
+            for sequence in outputs.sequences:
                 # TODO: double check decoded text and special tokens
                 completion = self.tokenizer.decode(sequence[input_ids.shape[1]:], skip_special_tokens=True)
                 is_success = self.oracle.verify(actual=completion, expected=[expected_answer])
 
-                trial_id = uuid4()
+                logging.debug(f"Trial {trial_num:3d}/{self.num_trials:3d}: success={is_success}, completion='{completion}'")
+
+                trial_id = generate_unique_id()
                 trial_dump_data = {
                     "trial_id": trial_id,
                     "trial_num": trial_num,
                     "timestamp": datetime.now().isoformat(),
+                    "prefix": prefix,
+                    "completion": completion,
                     "is_success": is_success,
-                    **dump_data
+                    "context": context,
+                    "expected_answer": expected_answer,
+                    "cache_key": cache_key,
+                    "additional_metadata": metadata
                 }
 
-                self.repo.save(key=trial_id,
-                               data=trial_dump_data,
-                               name=self.REPO_NAME_SUCCESS_PROB_ESTIMATION_TRIALS)
+                sample_repo.save(path="trials", key=trial_id, data=trial_dump_data)
 
                 if is_success:
                     success_count += 1
+
+                trial_num += 1
 
             remaining_trials -= current_batch_size
 
@@ -187,7 +196,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                            system_prompt: str,
                            user_prompt: str,
                            expected_answer: str,
-                           metadata: dict[str, t.Any] = None):
+                           sample_repo: SampleRepo):
         prefix = prefix or []
 
         # Base case 1: Single token or empty sequence
@@ -198,41 +207,49 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
         prefix_str = self.tokenizer.decode(prefix, skip_special_tokens=False)
         full_seq_str = self.tokenizer.decode(prefix + sequence, skip_special_tokens=False)
 
+        subdivide_id = generate_unique_id()
+
+        logging.debug(f"Estimating prob before and after for prefix (ID: {subdivide_id}): {prefix_str}")
 
         prob_before = self.estimate_success_probability(prefix=prefix_str,
                                                         system_prompt=system_prompt,
                                                         user_prompt=user_prompt,
                                                         expected_answer=expected_answer,
-                                                        metadata=metadata)
+                                                        sample_repo=sample_repo,
+                                                        metadata={"stage": "before_subdivision",
+                                                                  "subdivide_id": subdivide_id})
+        logging.debug(f"Prob before subdivision: {prob_before}")
+
         prob_after = self.estimate_success_probability(prefix=full_seq_str,
                                                         system_prompt=system_prompt,
                                                         user_prompt=user_prompt,
                                                         expected_answer=expected_answer,
-                                                        metadata=metadata)
-
-        subdivide_id = uuid4()
+                                                        sample_repo=sample_repo,
+                                                        metadata={"stage": "after_subdivision",
+                                                                  "subdivide_id": subdivide_id})
+        logging.debug(f"Prob after subdivision: {prob_after}")
+    
+        prob_delta = prob_after - prob_before
         sequence_str = self.tokenizer.decode(sequence, skip_special_tokens=False)
+        is_pivotal = abs(prob_delta) < self.prob_threshold
+
         dump_data = {
-            "subdivide_id": subdivide_id,
+            "subdivision_id": subdivide_id,
             "timestamp": datetime.now().isoformat(),
             "prob_before": prob_before,
             "prob_after": prob_after,
+            "prob_delta": prob_delta,
+            "is_pivotal": is_pivotal,
             "prefix": prefix_str,
             "full_seq": full_seq_str,
             "sequence": sequence_str,
-            "expected_answer": expected_answer,
-            "metadata": metadata,
-
-            # TODO: Large dump_data objects with full prompts repeated at every recursion level - memory intensive
-            # "system_prompt": system_prompt,
-            # "user_prompt": user_prompt,
+            "expected_answer": expected_answer
         }
-        self.repo.save(key=subdivide_id,
-                       data=dump_data,
-                       name=self.REPO_NAME_SUBDIVIDED_SEQUENCE)
+        sample_repo.save(path="subdivisions", key=subdivide_id, data=dump_data)
 
         # Base case 2: No significant change in probability
-        if abs(prob_after - prob_before) < self.prob_threshold:
+        if is_pivotal:
+            logging.debug(f"Probability delta {prob_delta} below threshold {self.prob_threshold}, stopping subdivision for sequence: {sequence_str}")
             return [sequence]
 
         left, right = self.split_sequence(sequence=sequence)
@@ -243,7 +260,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                                                 system_prompt=system_prompt,
                                                 user_prompt=user_prompt,
                                                 expected_answer=expected_answer,
-                                                metadata=metadata)
+                                                sample_repo=sample_repo)
 
         # Update prefix for right side by concatenating prefix and left side
         new_prefix = prefix + left
@@ -254,33 +271,81 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                                                 system_prompt=system_prompt,
                                                 user_prompt=user_prompt,
                                                 expected_answer=expected_answer,
-                                                metadata=metadata)
+                                                sample_repo=sample_repo)
 
         # Combine all segments
         return left_segments + right_segments
 
     def extract(self,
+                sample_id: str,
                 reasoning_trace: str,
                 system_prompt: str,
                 user_prompt: str,
                 actual_answer: str,
                 expected_answer: str,
                 metadata: dict[str, t.Any] | None = None) -> list[SuccessProbabilityShiftSpan]:
+        """
+        Extracts pivotal tokens and spans from the reasoning trace based on shifts in success probability.
+        Success probability is estimated by generating completions from the model and verifying them with the oracle.
+
+        Results are organized hierarchically under {repo_dir}/{sample_id}/.
+
+        :param reasoning_trace: Reasoning trace. If not ending with THINKING_END_TOKEN, it will be appended.
+        :param system_prompt: System prompt.
+        :param user_prompt: User prompt.
+        :param actual_answer: Answer after end-of-thinking token, e.g. </think>.
+        :param expected_answer: Ground truth answer.
+        :param sample_id: Unique identifier for this sample (will be used as directory name).
+        :param metadata: Additional metadata (e.g., dataset name, difficulty).
+        :return: List of extracted pivotal spans with success probability shifts.
+        """
         del actual_answer  # Not used in this extractor
 
         if reasoning_trace.strip() == "":
             raise ValueError("Reasoning trace is empty")
 
+        logging.debug(f"Starting extraction for sample {sample_id}")
+
+        # Create SampleRepo for this extraction run
+        logging.debug(f"Creating SampleRepo for sample ID: {sample_id}")
+        sample_repo = SampleRepo(sample_id=sample_id, base_repo=self.base_repo)
+
+        # Save sample metadata at the start
         metadata = metadata or {}
+        sample_metadata = {
+            "sample_id": sample_id,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "reasoning_trace": reasoning_trace,
+            "expected_answer": expected_answer,
+            "additional_metadata": metadata,
+            "created_at": datetime.now().isoformat()
+        }
+
+        logging.debug(f"Saving sample metadata for sample ID: {sample_id}")
+        sample_repo.save(path="", key="metadata", data=sample_metadata)
+
         init_prob = self.estimate_success_probability(prefix="",
                                                       system_prompt=system_prompt,
                                                       user_prompt=user_prompt,
                                                       expected_answer=expected_answer,
-                                                      metadata=metadata)
+                                                      sample_repo=sample_repo,
+                                                      metadata={"stage": "initial_probability"})
+
+        logging.debug(f"Initial success probability: {init_prob}")
         if not (self.min_prob <= init_prob <= self.max_prob):
             logging.info(f"Initial probability {init_prob} must be in [{self.min_prob}], {self.max_prob}]")
-            return []
+            # return []
+            pass
 
+        if not reasoning_trace.startswith(THINKING_START_TOKEN):
+            logging.debug(f"Appending missing '{THINKING_START_TOKEN}' to the reasoning trace")
+            reasoning_trace = f"{THINKING_START_TOKEN}\n{reasoning_trace}"
+
+        if not reasoning_trace.endswith(THINKING_END_TOKEN):
+            logging.debug(f"Appending missing '{THINKING_END_TOKEN}' to the reasoning trace")
+            reasoning_trace = f"{reasoning_trace}\n{THINKING_END_TOKEN}"
+    
         # Subdivide the sequence to find pivotal tokens
         sequence = self.tokenizer.encode(reasoning_trace, add_special_tokens=False)
         subdivided = self.subdivide_sequence(prefix=[],
@@ -288,13 +353,11 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                                              system_prompt=system_prompt,
                                              user_prompt=user_prompt,
                                              expected_answer=expected_answer,
-                                             metadata=metadata)
+                                             sample_repo=sample_repo)
 
         context = self.create_context(system_prompt=system_prompt, user_prompt=user_prompt)
 
-        tokenized = self.tokenizer(context, return_tensors="pt", padding=True)
-        tokenized_context = tokenized.input_ids[0].tolist()
-
+        current_prefix = ""
         pivotal_spans = []
         for span in subdivided:
             # Skip empty span
@@ -302,38 +365,42 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                 continue
 
             span_text = self.tokenizer.decode(span, skip_special_tokens=False)
+            logging.debug(f"Collecting stats for span: {span_text}")
 
-            current_context = self.tokenizer.decode(tokenized_context, skip_special_tokens=False)
-            prob_before = self.estimate_success_probability(prefix=current_context,
+            prob_before = self.estimate_success_probability(prefix=current_prefix,
                                                             system_prompt=system_prompt,
                                                             user_prompt=user_prompt,
                                                             expected_answer=expected_answer,
-                                                            metadata=metadata)
+                                                            sample_repo=sample_repo)
+            logging.debug(f"Probability before adding span: {prob_before}")
 
-            current_context_plus_span = self.tokenizer.decode(tokenized_context + span, skip_special_tokens=False)
-            prob_after = self.estimate_success_probability(prefix=current_context_plus_span,
+            current_prefix_plus_span = current_prefix + span_text
+            prob_after = self.estimate_success_probability(prefix=current_prefix_plus_span,
                                                             system_prompt=system_prompt,
                                                             user_prompt=user_prompt,
                                                             expected_answer=expected_answer,
-                                                            metadata=metadata)
+                                                            sample_repo=sample_repo)
+        
+            logging.debug(f"Probability after adding span: {prob_after}")
 
             prob_delta = prob_after - prob_before
+            logging.debug(f"Probability delta for span: {prob_delta}")
+
+            pivotal_context = context + current_prefix
             pivotal_span = SuccessProbabilityShiftSpan(token_ids=span,
                                                        span_text=span_text,
                                                        prob_before=prob_before,
                                                        prob_after=prob_after,
                                                        prob_delta=prob_delta,
-                                                       pivotal_context=current_context,
+                                                       pivotal_context=pivotal_context,
                                                        metadata=metadata)
-            span_id = uuid4()
+            span_id = generate_unique_id()
             span_dump_data = asdict(pivotal_span)
 
-            self.repo.save(key=span_id,
-                           data=span_dump_data,
-                           name=self.REPO_NAME_SPANS)
+            sample_repo.save(path="spans", key=span_id, data=span_dump_data)
 
+            current_prefix = current_prefix_plus_span
             pivotal_spans.append(pivotal_span)
-            tokenized_context = tokenized_context + span
 
         return pivotal_spans
 
@@ -345,6 +412,7 @@ class LogLikelihoodSpikeSpan(PivotalSpan):
 
 class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
     def extract(self,
+                sample_id: str,
                 reasoning_trace: str,
                 system_prompt: str,
                 user_prompt: str,

@@ -1,10 +1,9 @@
 import logging
-from pathlib import Path
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from pivotal_tokens.utils import get_hf_cache_dir
+from pivotal_tokens.constants import get_hf_cache_dir
 
 
 
