@@ -1,20 +1,31 @@
 import logging
-import shutil
+import random
+from dataclasses import asdict
 from pathlib import Path
 
-from transformers import GenerationConfig
+import pandas as pd
+import numpy as np
+import torch  # TODO: Missing import - torch.manual_seed is called below
+from transformers import GenerationConfig, set_seed
 
-from pivotal_tokens.hf import load_model, load_tokenizer
+from pivotal_tokens.hf.loading import load_model, load_tokenizer
 from pivotal_tokens.extractor import SuccessProbabilityShiftExtractor
 from pivotal_tokens.oracle import RegexOracle
 from pivotal_tokens.repo import DictRepo
 from pivotal_tokens.utils import setup_logging
 
 
-HF_MODEL_ID = "Qwen/Qwen3-1.7B"
-DICT_REPO_DIR = Path("repo")
-ORACLE_ANSWER_REGEX = r"(?s)\s*(?:Answer:\s*)?(.*?)\s*(?=(?:<\|im_end\|>|<\|endoftext\|>|\Z))"
+# TODO: Consider using transformers.set_seed() which sets all seeds at once
+# TODO: Seed should be configurable via CLI argument for multiple experimental runs
+RANDOM_SEED = 42
 
+# TODO: Consider making configurable via CLI arguments or config file
+HF_MODEL_ID = "Qwen/Qwen3-1.7B"
+DICT_REPO_DIR = Path("./repo")
+
+# TODO: Inconsistent instruction - says "without chain-of-thought after </think>" but also expects </think> to exist
+# TODO: Consider separating this into separate prompts for CoT and non-CoT modes
+# TODO: The phrase "strictly without chain-of-thought after </think>" is confusing - clarify the intent
 SYSTEM_PROMPT = ("Answer the following question directly, strictly without chain-of-thought after \"</think>\"."
                  "Keep the answer short (e.g., \"yes\" or \"no\" for binary questions, a person's full name if "
                  "the question expects a person, a country name if it asks about a country, etc.). Output the "
@@ -22,47 +33,62 @@ SYSTEM_PROMPT = ("Answer the following question directly, strictly without chain
 
 
 def main():
+    # TODO: Add argument parser for: model, dataset, device, hyperparams, output path, seed
+    # TODO: Add experiment tracking (MLflow, Weights & Biases) to log parameters and metrics
+
+    # TODO: Redundant - set_seed() already calls torch/np/random.seed internally
+    set_seed(RANDOM_SEED)
+    torch.manual_seed(RANDOM_SEED)
+    np.random.seed(RANDOM_SEED)
+    random.seed(RANDOM_SEED)
+
     setup_logging(logging.DEBUG)
 
-    shutil.rmtree(DICT_REPO_DIR)
-
-    model = load_model(model_id=HF_MODEL_ID, device="cpu")
+    # TODO: No error handling for model loading (CUDA OOM, network issues, missing model files)
+    # TODO: Device hardcoded - should auto-detect CUDA availability or make configurable
+    # TODO: Add try-except with informative error messages
+    # TODO: Consider adding model.eval() to ensure evaluation mode
+    model = load_model(model_id=HF_MODEL_ID, device="cuda")
     tokenizer = load_tokenizer(model_id=HF_MODEL_ID)
 
+    # TODO: CRITICAL - Directory management needs improvement (see shutil.rmtree concerns above)
+    # TODO: Consider timestamp-based subdirectories for each run
     base_repo = DictRepo(dirpath=DICT_REPO_DIR)
-    oracle = RegexOracle(answer_regex=ORACLE_ANSWER_REGEX,
-                            fuzzy_match_threshold=0.5)
+
+    oracle = RegexOracle(fuzzy_match_threshold=0.8)
 
     generation_config = GenerationConfig(temperature=0.6,
                                             top_p=0.95,
                                             top_k=20,
                                             min_p=0.1,
-                                            max_new_tokens=32,
+                                            max_new_tokens=4096,
                                             do_sample=True)
     extractor = SuccessProbabilityShiftExtractor(model=model,
                                                     tokenizer=tokenizer,
                                                     oracle=oracle,
                                                     base_repo=base_repo,
-                                                    prob_threshold=0.05,
-                                                    num_trials=2,
-                                                    min_prob=0.1,
-                                                    max_prob=0.9,
-                                                    batch_size=2,
-                                                    generation_config=generation_config) 
+                                                    prob_threshold=0.8,
+                                                    num_trials=50,
+                                                    min_prob=0.2,
+                                                    max_prob=0.8,
+                                                    batch_size=4,
+                                                    generation_config=generation_config)
+    df = pd.read_csv("data/hotpotqa_fullwiki_qwen3_1.7B_results.csv")
 
-    reasoning_trace = ("The capital of Czech Republic is Paris. Wait, I'm wrong, it is Prague.")
-    expected_answer = "Prague"
-    user_prompt = "What is the capital of Czech Republic?"
-    metadata = {"example_id": "debug_001"}
+    accumulator = []
+    for _, row in df.iterrows():
+        pivotal_tokens = extractor.extract(reasoning_trace=row["trace"],
+                                        system_prompt=SYSTEM_PROMPT,
+                                        user_prompt=row["query"],
+                                        expected_answer=row["ground_truth"],
+                                        actual_answer="",
+                                        sample_id=row["id"],
+                                        metadata={})
+        for pt in pivotal_tokens:
+            accumulator.append({"sample_id": row["id"], **asdict(pt)})
 
-    pivotal_tokens = extractor.extract(reasoning_trace=reasoning_trace,
-                                       system_prompt=SYSTEM_PROMPT,
-                                       user_prompt=user_prompt,
-                                       expected_answer=expected_answer,
-                                       actual_answer="Prague",
-                                       sample_id="example_1",
-                                       metadata=metadata)
-    print("Extracted Pivotal Tokens:", pivotal_tokens)
+    result_df = pd.DataFrame(accumulator)
+    result_df.to_csv("data/hotpotqa_fullwiki_qwen3_1.7B_pivotal_tokens.csv", index=False)
 
 
 if __name__ == "__main__":

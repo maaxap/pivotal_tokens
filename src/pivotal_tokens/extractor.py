@@ -18,6 +18,7 @@ THINKING_END_TOKEN = "</think>"
 
 @dataclass
 class PivotalSpan:
+    id: str
     token_ids: list[int]
     span_text: str
 
@@ -146,14 +147,17 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                                               generation_config=self.generation_config,
                                               return_dict_in_generate=True,
                                               num_return_sequences=current_batch_size)
+                
+            logging.debug(f"Generated {len(outputs.sequences)} completions for batch size {current_batch_size}")
 
             # Check success for each completion
             for sequence in outputs.sequences:
-                # TODO: double check decoded text and special tokens
-                completion = self.tokenizer.decode(sequence[input_ids.shape[1]:], skip_special_tokens=True)
+                completion = self.tokenizer.decode(sequence, skip_special_tokens=False)
                 is_success = self.oracle.verify(actual=completion, expected=[expected_answer])
 
-                logging.debug(f"Trial {trial_num:3d}/{self.num_trials:3d}: success={is_success}, completion='{completion}'")
+                trace_n_answer = self.tokenizer.decode(sequence[input_ids.shape[1]:], skip_special_tokens=False)
+                logging.debug(f"Trial {trial_num}/{self.num_trials}: success={is_success}, "
+                              f"expected_answer='{expected_answer}', completion='...{trace_n_answer}'")
 
                 trial_id = generate_unique_id()
                 trial_dump_data = {
@@ -386,15 +390,16 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
             prob_delta = prob_after - prob_before
             logging.debug(f"Probability delta for span: {prob_delta}")
 
+            span_id = generate_unique_id()
             pivotal_context = context + current_prefix
-            pivotal_span = SuccessProbabilityShiftSpan(token_ids=span,
+            pivotal_span = SuccessProbabilityShiftSpan(id=span_id,
+                                                       token_ids=span,
                                                        span_text=span_text,
                                                        prob_before=prob_before,
                                                        prob_after=prob_after,
                                                        prob_delta=prob_delta,
                                                        pivotal_context=pivotal_context,
                                                        metadata=metadata)
-            span_id = generate_unique_id()
             span_dump_data = asdict(pivotal_span)
 
             sample_repo.save(path="spans", key=span_id, data=span_dump_data)

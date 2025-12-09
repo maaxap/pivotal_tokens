@@ -4,6 +4,9 @@ import typing as t
 from abc import ABC, abstractmethod
 
 
+DEFAULT_ORACLE_ANSWER_REGEX = r"(?s)<\|im_start\|>assistant.*?(?:</think>\s*)?Answer:\s*(.*?)\s*(?=(?:<\|im_end\|>|<\|endoftext\|>|\Z))"
+
+
 def normalize_text(text: str) -> str:
     if not text:
         return ""
@@ -39,13 +42,15 @@ class Oracle(ABC):
 
 
 class RegexOracle(Oracle):
-    def __init__(self, answer_regex: str, fuzzy_match_threshold: float | None = None):
+
+    def __init__(self, answer_regex: str = DEFAULT_ORACLE_ANSWER_REGEX, fuzzy_match_threshold: float | None = None):
         self.answer_regex = answer_regex
         self.fuzzy_match_threshold = fuzzy_match_threshold
 
     def verify(self, actual: t.Any, expected: t.Sequence[t.Any]) -> bool:
         extracted_answer = self.extract_answer(actual)
         if extracted_answer is None:
+            logging.debug(f"Oracle verification failed, no answer extracted from completion: {actual}.")
             return False
 
         result = False
