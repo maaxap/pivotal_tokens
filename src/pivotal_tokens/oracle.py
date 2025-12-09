@@ -1,3 +1,4 @@
+import logging
 import re
 import typing as t
 from abc import ABC, abstractmethod
@@ -56,6 +57,11 @@ class RegexOracle(Oracle):
             normalized_extracted = normalize_text(extracted_answer)
             result = any(normalized_extracted == normalize_text(expected_anser)
                          for expected_anser in expected)
+            
+        match_type = "fuzzy" if self.fuzzy_match_threshold is not None else "exact"
+        logging.debug(f"Result of oracle verification with {match_type} match: "
+                      f"extracted_answer='{extracted_answer}', expected='{expected}', "
+                      f"result={result}")
 
         return result
 
