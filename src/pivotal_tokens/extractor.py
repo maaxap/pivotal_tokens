@@ -52,6 +52,7 @@ class SuccessProbabilityShiftSpan(PivotalSpan):
     prob_before: float
     prob_after: float
     prob_delta: float
+    is_pivotal: bool
 
     pivotal_context: str
 
@@ -115,7 +116,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                                      expected_answer: str,
                                      sample_repo: SampleRepo,
                                      metadata: dict[str, t.Any] | None = None) -> float:
-        # TODO: Cache key doesn't include generation_config parameters which can affect results
+        # TODO: Cache key doesn't include generation_config parameters which can affect results. Cache must be cleared for each example.
         cache_key = (prefix, system_prompt, user_prompt, self.num_trials, expected_answer)
         if cache_key in self.prob_cache:
             logging.debug(f"Using cached probability for key: {cache_key}")
@@ -314,6 +315,13 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
         logging.debug(f"Creating SampleRepo for sample ID: {sample_id}")
         sample_repo = SampleRepo(sample_id=sample_id, base_repo=self.base_repo)
 
+        init_prob = self.estimate_success_probability(prefix="",
+                                                      system_prompt=system_prompt,
+                                                      user_prompt=user_prompt,
+                                                      expected_answer=expected_answer,
+                                                      sample_repo=sample_repo,
+                                                      metadata={"stage": "initial_probability"})
+        
         # Save sample metadata at the start
         metadata = metadata or {}
         sample_metadata = {
@@ -323,32 +331,25 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
             "reasoning_trace": reasoning_trace,
             "expected_answer": expected_answer,
             "additional_metadata": metadata,
+            "init_prob": init_prob,
             "created_at": datetime.now().isoformat()
         }
 
         logging.debug(f"Saving sample metadata for sample ID: {sample_id}")
         sample_repo.save(path="", key="metadata", data=sample_metadata)
 
-        init_prob = self.estimate_success_probability(prefix="",
-                                                      system_prompt=system_prompt,
-                                                      user_prompt=user_prompt,
-                                                      expected_answer=expected_answer,
-                                                      sample_repo=sample_repo,
-                                                      metadata={"stage": "initial_probability"})
-
         logging.debug(f"Initial success probability: {init_prob}")
         if not (self.min_prob <= init_prob <= self.max_prob):
             logging.info(f"Initial probability {init_prob} must be in [{self.min_prob}], {self.max_prob}]")
-            # return []
-            pass
+            return []
 
         if not reasoning_trace.startswith(THINKING_START_TOKEN):
             logging.debug(f"Appending missing '{THINKING_START_TOKEN}' to the reasoning trace")
             reasoning_trace = f"{THINKING_START_TOKEN}\n{reasoning_trace}"
 
-        if not reasoning_trace.endswith(THINKING_END_TOKEN):
-            logging.debug(f"Appending missing '{THINKING_END_TOKEN}' to the reasoning trace")
-            reasoning_trace = f"{reasoning_trace}\n{THINKING_END_TOKEN}"
+        # if not reasoning_trace.endswith(THINKING_END_TOKEN):
+        #     logging.debug(f"Appending missing '{THINKING_END_TOKEN}' to the reasoning trace")
+        #     reasoning_trace = f"{reasoning_trace}\n{THINKING_END_TOKEN}"
     
         # Subdivide the sequence to find pivotal tokens
         sequence = self.tokenizer.encode(reasoning_trace, add_special_tokens=False)
@@ -392,12 +393,14 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
 
             span_id = generate_unique_id()
             pivotal_context = context + current_prefix
+            is_pivotal = abs(prob_delta) < self.prob_threshold
             pivotal_span = SuccessProbabilityShiftSpan(id=span_id,
                                                        token_ids=span,
                                                        span_text=span_text,
                                                        prob_before=prob_before,
                                                        prob_after=prob_after,
                                                        prob_delta=prob_delta,
+                                                       is_pivotal=is_pivotal,
                                                        pivotal_context=pivotal_context,
                                                        metadata=metadata)
             span_dump_data = asdict(pivotal_span)

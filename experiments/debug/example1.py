@@ -55,19 +55,19 @@ def main():
     # TODO: Consider timestamp-based subdirectories for each run
     base_repo = DictRepo(dirpath=DICT_REPO_DIR)
 
-    oracle = RegexOracle(fuzzy_match_threshold=0.8)
+    oracle = RegexOracle(fuzzy_match_threshold=0.7)
 
     generation_config = GenerationConfig(temperature=0.6,
                                             top_p=0.95,
                                             top_k=20,
-                                            min_p=0.1,
+                                            min_p=0.0,
                                             max_new_tokens=4096,
                                             do_sample=True)
     extractor = SuccessProbabilityShiftExtractor(model=model,
                                                     tokenizer=tokenizer,
                                                     oracle=oracle,
                                                     base_repo=base_repo,
-                                                    prob_threshold=0.8,
+                                                    prob_threshold=0.1,
                                                     num_trials=50,
                                                     min_prob=0.2,
                                                     max_prob=0.8,
@@ -86,6 +86,8 @@ def main():
                                         metadata={})
         for pt in pivotal_tokens:
             accumulator.append({"sample_id": row["id"], **asdict(pt)})
+
+        extractor.clear_cache()
 
     result_df = pd.DataFrame(accumulator)
     result_df.to_csv("data/hotpotqa_fullwiki_qwen3_1.7B_pivotal_tokens.csv", index=False)
