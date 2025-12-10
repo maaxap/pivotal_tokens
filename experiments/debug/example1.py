@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import torch  # TODO: Missing import - torch.manual_seed is called below
+from sympy.physics.units import temperature
 from transformers import GenerationConfig, set_seed
 
 from pivotal_tokens.hf.loading import load_model, load_tokenizer
@@ -58,11 +59,12 @@ def main():
     oracle = RegexOracle(fuzzy_match_threshold=0.7)
 
     generation_config = GenerationConfig(temperature=0.6,
-                                            top_p=0.95,
-                                            top_k=20,
-                                            min_p=0.0,
-                                            max_new_tokens=4096,
-                                            do_sample=True)
+                                         top_p=0.95,
+                                         top_k=20,
+                                         min_p=0.0,
+                                         max_new_tokens=4096,
+                                         pad_token_id=tokenizer.pad_token_id,
+                                         do_sample=True)
     extractor = SuccessProbabilityShiftExtractor(model=model,
                                                     tokenizer=tokenizer,
                                                     oracle=oracle,
@@ -71,7 +73,7 @@ def main():
                                                     num_trials=50,
                                                     min_prob=0.2,
                                                     max_prob=0.8,
-                                                    batch_size=4,
+                                                    batch_size=16,
                                                     generation_config=generation_config)
     df = pd.read_csv("data/hotpotqa_fullwiki_qwen3_1.7B_results.csv")
 
@@ -90,7 +92,7 @@ def main():
         extractor.clear_cache()
 
     result_df = pd.DataFrame(accumulator)
-    result_df.to_csv("data/hotpotqa_fullwiki_qwen3_1.7B_pivotal_tokens.csv", index=False)
+    result_df.to_csv("data/hotpotqa_fullwiki_qwen3_1.7B_pivotal_tokens_custom.csv", index=False)
 
 
 if __name__ == "__main__":

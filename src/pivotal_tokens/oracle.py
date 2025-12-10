@@ -5,7 +5,6 @@ from abc import ABC, abstractmethod
 
 
 DEFAULT_ORACLE_RESPONSE_REGEX = r"(?s)\A.*</think>(?!.*</think>)(.*)\Z"
-# DEFAULT_ORACLE_ANSWER_REGEX = r"(?s)<\|im_start\|>assistant.*?(?:</think>\s*)?Answer:\s*(.*?)\s*(?=(?:<\|im_end\|>|<\|endoftext\|>|\Z))"
 DEFAULT_ORACLE_ANSWER_REGEX = r"(?s)\s*(?:Answer:\s*)?(.*?)\s*(?=(?:<\|im_end\|>|<\|endoftext\|>|\Z))"
 
 
@@ -60,7 +59,6 @@ class RegexOracle(Oracle):
             logging.debug(f"Oracle verification failed, no answer extracted from completion: {actual}.")
             return False
 
-        result = False
         if self.fuzzy_match_threshold is not None:
             similarities = [compute_similarity(extracted_answer, expected_answer)
                             for expected_answer in expected]
@@ -71,8 +69,8 @@ class RegexOracle(Oracle):
             result = any(sim >= self.fuzzy_match_threshold for sim in similarities)
         else:
             normalized_extracted = normalize_text(extracted_answer)
-            result = any(normalized_extracted == normalize_text(expected_anser)
-                         for expected_anser in expected)
+            result = any(normalized_extracted == normalize_text(expected_answer)
+                         for expected_answer in expected)
             
         match_type = "fuzzy" if self.fuzzy_match_threshold is not None else "exact"
         logging.debug(f"Result of oracle verification with {match_type} match: "
