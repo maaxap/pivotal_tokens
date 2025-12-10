@@ -373,45 +373,52 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                 continue
 
             span_text = self.tokenizer.decode(span, skip_special_tokens=False)
-            logging.debug(f"Collecting stats for span: '{span_text}'")
 
-            prob_before = self.estimate_success_probability(prefix=current_prefix,
+            if len(span) == 1:
+                logging.debug(f"Collecting stats for span: '{span_text}'")
+
+                prob_before = self.estimate_success_probability(prefix=current_prefix,
+                                                                system_prompt=system_prompt,
+                                                                user_prompt=user_prompt,
+                                                                expected_answer=expected_answer,
+                                                                sample_repo=sample_repo)
+                logging.debug(f"Probability before adding span: {prob_before}")
+
+                current_prefix_plus_span = current_prefix + span_text
+                prob_after = self.estimate_success_probability(prefix=current_prefix_plus_span,
                                                             system_prompt=system_prompt,
                                                             user_prompt=user_prompt,
                                                             expected_answer=expected_answer,
                                                             sample_repo=sample_repo)
-            logging.debug(f"Probability before adding span: {prob_before}")
+                logging.debug(f"Probability after adding span: {prob_after}")
 
-            current_prefix_plus_span = current_prefix + span_text
-            prob_after = self.estimate_success_probability(prefix=current_prefix_plus_span,
-                                                           system_prompt=system_prompt,
-                                                           user_prompt=user_prompt,
-                                                           expected_answer=expected_answer,
-                                                           sample_repo=sample_repo)
-            logging.debug(f"Probability after adding span: {prob_after}")
+                prob_delta = prob_after - prob_before
+                logging.debug(f"Probability delta for span: {prob_delta}")
 
-            prob_delta = prob_after - prob_before
-            logging.debug(f"Probability delta for span: {prob_delta}")
+                span_id = generate_unique_id()
+                pivotal_context = context + current_prefix
+                is_pivotal = abs(prob_delta) >= self.prob_threshold
 
-            span_id = generate_unique_id()
-            pivotal_context = context + current_prefix
-            is_pivotal = abs(prob_delta) >= self.prob_threshold
-            pivotal_span = SuccessProbabilityShiftSpan(sample_id=sample_id,
-                                                       span_id=span_id,
-                                                       token_ids=span,
-                                                       span_text=span_text,
-                                                       prob_before=prob_before,
-                                                       prob_after=prob_after,
-                                                       prob_delta=prob_delta,
-                                                       is_pivotal=is_pivotal,
-                                                       pivotal_context=pivotal_context,
-                                                       metadata=metadata)
-            span_dump_data = asdict(pivotal_span)
+                if is_pivotal:
+                    pivotal_span = SuccessProbabilityShiftSpan(sample_id=sample_id,
+                                                            span_id=span_id,
+                                                            token_ids=span,
+                                                            span_text=span_text,
+                                                            prob_before=prob_before,
+                                                            prob_after=prob_after,
+                                                            prob_delta=prob_delta,
+                                                            is_pivotal=is_pivotal,
+                                                            pivotal_context=pivotal_context,
+                                                            metadata=metadata)
+                    span_dump_data = asdict(pivotal_span)
 
-            sample_repo.save(path="spans", key=span_id, data=span_dump_data)
-            pivotal_spans.append(pivotal_span)
+                    sample_repo.save(path="spans", key=span_id, data=span_dump_data)
 
-            current_prefix = current_prefix_plus_span
+                    logging.debug(f"Identified pivotal span: '{span_text}' with delta {prob_delta}")
+
+                    pivotal_spans.append(pivotal_span)
+
+            current_prefix += span_text
 
         return pivotal_spans
 
