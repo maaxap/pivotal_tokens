@@ -9,6 +9,7 @@ dependencies = [
     "datasets>=4.2.0",
     "ipykernel>=7.1.0",
     "ipython>=9.8.0",
+    "jsonlines>=4.0.0",
     "torch>=2.8.0",
     "tqdm>=4.67.1",
     "transformers>=4.57.1",

@@ -18,7 +18,9 @@ THINKING_END_TOKEN = "</think>"
 
 @dataclass
 class PivotalSpan:
-    id: str
+    sample_id: str
+
+    span_id: str
     token_ids: list[int]
     span_text: str
 
@@ -82,7 +84,8 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
 
         vocab_keys = tokenizer.get_vocab().keys()
         if THINKING_START_TOKEN not in vocab_keys or THINKING_END_TOKEN not in vocab_keys:
-            raise ValueError(f"Tokenizer must support special thinking tokens: {THINKING_START_TOKEN}, {THINKING_END_TOKEN}")
+            raise ValueError(f"Tokenizer must support special thinking tokens: {THINKING_START_TOKEN}, "
+                             f"{THINKING_END_TOKEN}")
 
         self.model = model
         self.tokenizer = tokenizer
@@ -116,7 +119,8 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                                      expected_answer: str,
                                      sample_repo: SampleRepo,
                                      metadata: dict[str, t.Any] | None = None) -> float:
-        # TODO: Cache key doesn't include generation_config parameters which can affect results. Cache must be cleared for each example.
+        # TODO: Cache key doesn't include generation_config parameters which can affect results. Cache must be
+        #  cleared for each example.
         cache_key = (prefix, system_prompt, user_prompt, self.num_trials, expected_answer)
         if cache_key in self.prob_cache:
             logging.debug(f"Using cached probability for key: {cache_key}")
@@ -157,7 +161,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                 is_success = self.oracle.verify(actual=completion, expected=[expected_answer])
 
                 trace_n_answer = self.tokenizer.decode(sequence[input_ids.shape[1]:], skip_special_tokens=False)
-                logging.debug(f"Trial {trial_num}/{self.num_trials}: success={is_success}, "
+                logging.debug(f"Trial {trial_num+1}/{self.num_trials}: success={is_success}, "
                               f"expected_answer='{expected_answer}', completion='...{trace_n_answer}'")
 
                 trial_id = generate_unique_id()
@@ -202,8 +206,6 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                            user_prompt: str,
                            expected_answer: str,
                            sample_repo: SampleRepo):
-        prefix = prefix or []
-
         # Base case 1: Single token or empty sequence
         if len(sequence) <= 1:
             return [sequence]
@@ -236,7 +238,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
     
         prob_delta = prob_after - prob_before
         sequence_str = self.tokenizer.decode(sequence, skip_special_tokens=False)
-        is_pivotal = abs(prob_delta) < self.prob_threshold
+        notable_change = abs(prob_delta) >= self.prob_threshold
 
         dump_data = {
             "subdivision_id": subdivide_id,
@@ -244,7 +246,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
             "prob_before": prob_before,
             "prob_after": prob_after,
             "prob_delta": prob_delta,
-            "is_pivotal": is_pivotal,
+            "notable_change": notable_change,
             "prefix": prefix_str,
             "full_seq": full_seq_str,
             "sequence": sequence_str,
@@ -253,8 +255,9 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
         sample_repo.save(path="subdivisions", key=subdivide_id, data=dump_data)
 
         # Base case 2: No significant change in probability
-        if is_pivotal:
-            logging.debug(f"Probability delta {prob_delta} below threshold {self.prob_threshold}, stopping subdivision for sequence: {sequence_str}")
+        if not notable_change:
+            logging.debug(f"Probability delta {prob_delta} below threshold {self.prob_threshold}, stopping "
+                          f"subdivision for sequence: {sequence_str}")
             return [sequence]
 
         left, right = self.split_sequence(sequence=sequence)
@@ -370,7 +373,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                 continue
 
             span_text = self.tokenizer.decode(span, skip_special_tokens=False)
-            logging.debug(f"Collecting stats for span: {span_text}")
+            logging.debug(f"Collecting stats for span: '{span_text}'")
 
             prob_before = self.estimate_success_probability(prefix=current_prefix,
                                                             system_prompt=system_prompt,
@@ -381,11 +384,10 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
 
             current_prefix_plus_span = current_prefix + span_text
             prob_after = self.estimate_success_probability(prefix=current_prefix_plus_span,
-                                                            system_prompt=system_prompt,
-                                                            user_prompt=user_prompt,
-                                                            expected_answer=expected_answer,
-                                                            sample_repo=sample_repo)
-        
+                                                           system_prompt=system_prompt,
+                                                           user_prompt=user_prompt,
+                                                           expected_answer=expected_answer,
+                                                           sample_repo=sample_repo)
             logging.debug(f"Probability after adding span: {prob_after}")
 
             prob_delta = prob_after - prob_before
@@ -393,8 +395,9 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
 
             span_id = generate_unique_id()
             pivotal_context = context + current_prefix
-            is_pivotal = abs(prob_delta) < self.prob_threshold
-            pivotal_span = SuccessProbabilityShiftSpan(id=span_id,
+            is_pivotal = abs(prob_delta) >= self.prob_threshold
+            pivotal_span = SuccessProbabilityShiftSpan(sample_id=sample_id,
+                                                       span_id=span_id,
                                                        token_ids=span,
                                                        span_text=span_text,
                                                        prob_before=prob_before,
@@ -406,9 +409,9 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
             span_dump_data = asdict(pivotal_span)
 
             sample_repo.save(path="spans", key=span_id, data=span_dump_data)
+            pivotal_spans.append(pivotal_span)
 
             current_prefix = current_prefix_plus_span
-            pivotal_spans.append(pivotal_span)
 
         return pivotal_spans
 
