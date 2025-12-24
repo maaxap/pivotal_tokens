@@ -23,75 +23,45 @@ from pivotal_tokens.repo import DictRepo
 from pivotal_tokens.utils import setup_logging
 
 
-# Model / hardware
-MODEL_ID = "Qwen/Qwen3-1.7B"
-DEVICE = "cpu"
-
-# Dataset
-DATASET_SPLIT = "validation"
-DATASET_NAME = "fullwiki"
-
-# Prompting
 SYSTEM_PROMPT = ("Answer the following question directly, strictly without chain-of-thought after \"</think>\"."
                  "Keep the answer short (e.g., \"yes\" or \"no\" for binary questions, a person's full name if "
                  "the question expects a person, a country name if it asks about a country, etc.). Output the "
                  "answer strictly after the prefix \"Answer: \"  with no extra text.")
 
-ENABLE_THINKING = True
-
-# Generation
-BATCH_SIZE = 16
-MAX_NEW_TOKENS = 4096
-TEMPERATURE = 0.6
-TOP_P = 0.95
-TOP_K = 20
-MIN_P = 0.0
-DO_SAMPLE = True
-
-# Oracle
-FUZZY_MATCH_THRESHOLD = 0.7
-
-# Output
-OUTPUT_PATH = Path("experiments/exp0.1_eval/data/hotpotqa_fullwiki_qwen3_1.7B_results.csv")
-CACHE_DIR = Path("experiments/exp0.1_eval/cache")
-
-# Run control
-RANDOM_SEED = 42
-
 
 @dataclass
 class Config:
+    # Output
+    output_path: str = field(metadata={"help": "CSV path for results."})
+    cache_dir: str = field(metadata={"help": "Directory path for completion cache."})
+
     # Model / hardware
-    model_id: str = field(default=MODEL_ID, metadata={"help": "Hugging Face model id to load."})
-    device: str = field(default=DEVICE, metadata={"help": "Device string to force (e.g., 'cuda', 'cpu')."})
+    model_id: str = field(metadata={"help": "Hugging Face model id to load."})
+    device: str = field(metadata={"help": "Device string to force (e.g., 'cuda', 'cpu')."})
 
     # Dataset
-    dataset_split: str = field(default=DATASET_SPLIT, metadata={"help": "HotpotQA split (train/validation/test)."})
-    dataset_name: str = field(default=DATASET_NAME, metadata={"help": "HotpotQA configuration name (e.g., fullwiki)."})
+    dataset_split: str = field(metadata={"help": "HotpotQA split (train/validation/test)."})
+    dataset_name: str = field(metadata={"help": "HotpotQA configuration name (e.g., fullwiki)."})
 
     # Prompting
-    system_prompt: str = field(default=SYSTEM_PROMPT, metadata={"help": "System prompt text used for generation."})
-    enable_thinking: bool = field(default=ENABLE_THINKING, metadata={"help": "Use thinking tokens in the chat template."})
+    system_prompt: str = field(metadata={"help": "System prompt text used for generation."})
+    enable_thinking: bool = field(metadata={"help": "Use thinking tokens in the chat template."})
 
     # Generation
-    batch_size: int = field(default=BATCH_SIZE, metadata={"help": "Samples to generate per batch."})
-    max_new_tokens: int = field(default=MAX_NEW_TOKENS, metadata={"help": "Max new tokens per completion."})
-    temperature: float = field(default=TEMPERATURE, metadata={"help": "Sampling temperature."})
-    top_p: float = field(default=TOP_P, metadata={"help": "Top-p nucleus sampling parameter."})
-    top_k: int = field(default=TOP_K, metadata={"help": "Top-k sampling parameter."})
-    min_p: float = field(default=MIN_P, metadata={"help": "Minimum probability cutoff for sampling."})
-    do_sample: bool = field(default=DO_SAMPLE, metadata={"help": "Enable sampling (otherwise greedy decoding)."})
+    batch_size: int = field(metadata={"help": "Samples to generate per batch."})
+    max_new_tokens: int = field(metadata={"help": "Max new tokens per completion."})
+    temperature: float = field(metadata={"help": "Sampling temperature."})
+    top_p: float = field(metadata={"help": "Top-p nucleus sampling parameter."})
+    top_k: int = field(metadata={"help": "Top-k sampling parameter."})
+    min_p: float = field(metadata={"help": "Minimum probability cutoff for sampling."})
+    do_sample: bool = field(metadata={"help": "Enable sampling (otherwise greedy decoding)."})
 
     # Oracle
-    fuzzy_match_threshold: float = field(default=FUZZY_MATCH_THRESHOLD, metadata={"help": "Jaccard similarity threshold for oracle fuzzy match."})
-    
-    # Output
-    output_path: str = field(default=str(OUTPUT_PATH), metadata={"help": "CSV path for results."})
+    fuzzy_match_threshold: float = field(metadata={"help": "Jaccard similarity threshold for oracle fuzzy match."})
 
     # Run control
-    seed: int = field(default=RANDOM_SEED, metadata={"help": "Random seed for reproducibility."})
-    debug: bool = field(default=False, metadata={"help": "Whether to run in debug mode."})
-
+    seed: int = field(metadata={"help": "Random seed for reproducibility."})
+    debug: bool = field(metadata={"help": "Whether to run in debug mode."})
 
 def load_config(path: Path) -> Config:
     config_dict = json.loads(path.read_text())
@@ -145,7 +115,7 @@ def main(config: Config):
     )
 
     oracle = RegexOracle(fuzzy_match_threshold=config.fuzzy_match_threshold)
-    repo = DictRepo(dirpath=CACHE_DIR)
+    repo = DictRepo(dirpath=Path(config.cache_dir))
     samples = load_hotpotqa_dataset(split=config.dataset_split, name=config.dataset_name)
     cache_path = f"{config.dataset_name}/{config.dataset_split}"
 
@@ -164,6 +134,8 @@ def main(config: Config):
             continue
 
         results.append(result)
+
+    logging.info(f"Found {len(results)} cached completions, {len(unprocessed)} to process.")
             
 
     for i in range(0, len(unprocessed), config.batch_size):
@@ -200,9 +172,13 @@ def main(config: Config):
             except Exception as e:
                 logging.error(f"Postprocessing failed for sample {sample.id}: {e}")
 
+        break
+
     df = pd.DataFrame(results)
     df["metadata"] = df["metadata"].apply(lambda x: json.dumps(x, indent=2))
-    df.to_csv(output_path, index=False)
+    df.to_csv(Path(config.output_path), index=False)
+
+    logging.info(f"Saved results to {config.output_path}.")
 
 
 if __name__ == "__main__":

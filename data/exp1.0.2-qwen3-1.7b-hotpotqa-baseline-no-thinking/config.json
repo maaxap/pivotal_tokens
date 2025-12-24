@@ -13,7 +13,8 @@
   "min_p": 0.0,
   "do_sample": true,
   "fuzzy_match_threshold": 0.7,
-  "output_path": "./experiments/exp1.0.2-qwen3-1.7b-hotpotqa-baseline-no-thinking/data/results.csv",
+  "output_path": "./data/exp1.0.2-qwen3-1.7b-hotpotqa-baseline-no-thinking/results.csv",
+  "cache_dir": "./data/exp1.0.2-qwen3-1.7b-hotpotqa-baseline-no-thinking/.cache",
   "seed": 42,
   "debug": false
 }
