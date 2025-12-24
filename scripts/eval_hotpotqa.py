@@ -172,8 +172,6 @@ def main(config: Config):
             except Exception as e:
                 logging.error(f"Postprocessing failed for sample {sample.id}: {e}")
 
-        break
-
     df = pd.DataFrame(results)
     df["metadata"] = df["metadata"].apply(lambda x: json.dumps(x, indent=2))
     df.to_csv(Path(config.output_path), index=False)
