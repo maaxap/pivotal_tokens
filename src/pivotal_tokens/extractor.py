@@ -133,7 +133,7 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
         context = self.create_context(system_prompt=system_prompt, user_prompt=user_prompt)
         context += prefix
 
-        tokenized = self.tokenizer(context, return_tensors="pt", padding=True)
+        tokenized = self.tokenizer(context, return_tensors="pt", padding=True, add_special_tokens=True)
         input_ids = tokenized.input_ids.to(self.model.device)
         attention_mask = tokenized.attention_mask.to(self.model.device) if "attention_mask" in tokenized else None
 
@@ -398,25 +398,22 @@ class SuccessProbabilityShiftExtractor(PivotalSpanExtractor):
                 span_id = generate_unique_id()
                 pivotal_context = context + current_prefix
                 is_pivotal = abs(prob_delta) >= self.prob_threshold
+                pivotal_span = SuccessProbabilityShiftSpan(sample_id=sample_id,
+                                                        span_id=span_id,
+                                                        token_ids=span,
+                                                        span_text=span_text,
+                                                        prob_before=prob_before,
+                                                        prob_after=prob_after,
+                                                        prob_delta=prob_delta,
+                                                        is_pivotal=is_pivotal,
+                                                        pivotal_context=pivotal_context,
+                                                        metadata=metadata)
+                span_dump_data = asdict(pivotal_span)
+                sample_repo.save(path="spans", key=span_id, data=span_dump_data)
 
-                if is_pivotal:
-                    pivotal_span = SuccessProbabilityShiftSpan(sample_id=sample_id,
-                                                            span_id=span_id,
-                                                            token_ids=span,
-                                                            span_text=span_text,
-                                                            prob_before=prob_before,
-                                                            prob_after=prob_after,
-                                                            prob_delta=prob_delta,
-                                                            is_pivotal=is_pivotal,
-                                                            pivotal_context=pivotal_context,
-                                                            metadata=metadata)
-                    span_dump_data = asdict(pivotal_span)
+                logging.debug(f"Identified pivotal span: '{span_text}' with delta {prob_delta}")
 
-                    sample_repo.save(path="spans", key=span_id, data=span_dump_data)
-
-                    logging.debug(f"Identified pivotal span: '{span_text}' with delta {prob_delta}")
-
-                    pivotal_spans.append(pivotal_span)
+                pivotal_spans.append(pivotal_span)
 
             current_prefix += span_text
 
