@@ -32,48 +32,30 @@ def extract_thinking_trace(generated_text: str, regex: str = THINKING_TRACE_REGE
     return trace
 
 
-def batch_sample(
+def batch_sampling(
     samples: list[Sample],
     system_prompt: str,
     model: PreTrainedModel,
     tokenizer: PreTrainedTokenizer,
     generation_config: GenerationConfig,
-    batch_size: int | None = None,
     enable_thinking: bool = True
 ) -> list[str]:
-    
-    if batch_size is None:
-        batch_size = len(samples)
+    inputs = [
+        prep_generation_context(sample=sample,
+                                system_prompt=system_prompt,
+                                tokenizer=tokenizer,
+                                enable_thinking=enable_thinking)
+        for sample in samples
+    ]
 
-    inputs = []
-    for sample in samples:
-        context = prep_generation_context(sample=sample,
-                                          system_prompt=system_prompt,
-                                          tokenizer=tokenizer,
-                                          enable_thinking=enable_thinking)
-        inputs.append(context)
-    
-    outputs = []
-    remaining_samples = len(samples)
     with torch.no_grad():
-        while remaining_samples > 0:
-            current_batch_size = min(batch_size, remaining_samples)
+        encodings = tokenizer(inputs, return_tensors="pt", padding=True)
+        input_ids = encodings["input_ids"].to(model.device)
+        attention_mask = encodings["attention_mask"].to(model.device)
 
-            num_processed_samples = len(outputs)
-            current_inputs = inputs[num_processed_samples:num_processed_samples+current_batch_size]
+        outputs = model.generate(input_ids=input_ids,
+                                 attention_mask=attention_mask,
+                                 generation_config=generation_config)
 
-            encodings = tokenizer(current_inputs, return_tensors="pt", padding=True)
-            input_ids = encodings["input_ids"].to(model.device)
-            attention_mask = encodings["attention_mask"].to(model.device)
-
-            batch_outputs = model.generate(input_ids=input_ids,
-                                           attention_mask=attention_mask,
-                                           generation_config=generation_config)
-            outputs.extend(batch_outputs)
-            remaining_samples -= current_batch_size
-
-            logging.debug(f"Generated {len(outputs)} samples out of {len(inputs)}")
-    
     decoded_outputs = tokenizer.batch_decode(outputs, skip_special_tokens=False)
-    return decoded_outputs 
-    
+    return decoded_outputs

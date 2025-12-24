@@ -17,7 +17,7 @@ class Repo(ABC):
         pass
 
     @abstractmethod
-    def load(self, path: str, key: str) -> dict:
+    def load(self, path: str, key: str) -> dict[str, t.Any] | None:
         """
         Load dict from disk.
 
@@ -33,7 +33,7 @@ class NoopRepo(Repo):
     def save(self, path: str, key: str, data: dict[str, t.Any]) -> None:
         pass
 
-    def load(self, path: str, key: str) -> dict:
+    def load(self, path: str, key: str) -> dict[str, t.Any] | None:
         raise NotImplementedError("NoopRepo does not support loading data")
 
 
@@ -51,10 +51,10 @@ class DictRepo(Repo):
 
         filepath.write_text(json.dumps(data, indent=2))
 
-    def load(self, path: str, key: str) -> dict[str, t.Any]:
+    def load(self, path: str, key: str) -> dict[str, t.Any] | None:
         filepath = self.dirpath / path / f"{key}.json"
         if not filepath.is_file():
-            raise FileNotFoundError(f"File {filepath} does not exist")
+            return None
 
         return json.loads(filepath.read_text())
     
@@ -73,7 +73,7 @@ class SampleRepo(Repo):
         prefixed_path = f"{self.sample_id}/{path}" if path else self.sample_id
         self.base_repo.save(path=prefixed_path, key=key, data=data)
 
-    def load(self, path: str, key: str) -> dict[str, t.Any]:
+    def load(self, path: str, key: str) -> dict[str, t.Any] | None:
         """Load with sample_id prefix: {sample_id}/{path}"""
         prefixed_path = f"{self.sample_id}/{path}" if path else self.sample_id
         return self.base_repo.load(path=prefixed_path, key=key)
