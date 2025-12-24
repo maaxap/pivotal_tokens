@@ -1,6 +1,6 @@
 {
   "model_id": "Qwen/Qwen3-1.7B",
-  "device": "cpu",
+  "device": "cuda",
   "dataset_split": "validation",
   "dataset_name": "fullwiki",
   "system_prompt": "Answer the following question directly, strictly without chain-of-thought after \"</think>\".Keep the answer short (e.g., \"yes\" or \"no\" for binary questions, a person's full name if the question expects a person, a country name if it asks about a country, etc.). Output the answer strictly after the prefix \"Answer: \"  with no extra text.",
