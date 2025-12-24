@@ -12,5 +12,5 @@ wheels/
 .idea
 .cache
 
-data/
+data/**/repo
 notebooks/**/data/

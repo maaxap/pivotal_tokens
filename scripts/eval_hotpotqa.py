@@ -1,5 +1,6 @@
 """Generate model completions for HotpotQA, extract thinking traces, and score with an oracle."""
 
+import argparse
 import hashlib
 import logging
 import json
@@ -11,7 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
-from transformers import GenerationConfig, HfArgumentParser, set_seed
+from transformers import GenerationConfig, set_seed
 
 from pivotal_tokens.hf.dataset import load_hotpotqa_dataset
 from pivotal_tokens.hf.loading import load_model, load_tokenizer
@@ -59,7 +60,7 @@ RANDOM_SEED = 42
 
 
 @dataclass
-class EvalArgs:
+class Config:
     # Model / hardware
     model_id: str = field(default=MODEL_ID, metadata={"help": "Hugging Face model id to load."})
     device: str = field(default=DEVICE, metadata={"help": "Device string to force (e.g., 'cuda', 'cpu')."})
@@ -89,13 +90,18 @@ class EvalArgs:
 
     # Run control
     seed: int = field(default=RANDOM_SEED, metadata={"help": "Random seed for reproducibility."})
-    log_level: str = field(default="INFO", metadata={"help": "Logging level (e.g., INFO, DEBUG)."})
+    debug: bool = field(default=False, metadata={"help": "Whether to run in debug mode."})
 
 
-def parse_args() -> EvalArgs:
-    parser = HfArgumentParser(EvalArgs)
-    (args,) = parser.parse_args_into_dataclasses()
-    return args
+def load_config(path: Path) -> Config:
+    config_dict = json.loads(path.read_text())
+    return Config(**config_dict)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate HotpotQA completions based on a JSON config file.")
+    parser.add_argument("--config", type=Path, required=True, help="Path to JSON file containing EvalArgs configuration.")
+    return parser.parse_args() 
 
 
 def build_completion_cache_key(sample_query: str, system_prompt: str, generation_config: GenerationConfig) -> str:
@@ -117,40 +123,40 @@ def build_cache_payload(sample: Sample, completion: str, trace: str | None, orac
     }
 
 
-def main(args: EvalArgs):
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    set_seed(args.seed)
+def main(config: Config):
+    random.seed(config.seed)
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    set_seed(config.seed)
 
-    device = args.device 
-    model = load_model(model_id=args.model_id, device=device)
-    tokenizer = load_tokenizer(model_id=args.model_id)
+    device = config.device 
+    model = load_model(model_id=config.model_id, device=device)
+    tokenizer = load_tokenizer(model_id=config.model_id)
     model.eval()
 
     generation_config = GenerationConfig(
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        min_p=args.min_p,
-        do_sample=args.do_sample,
+        max_new_tokens=config.max_new_tokens,
+        temperature=config.temperature,
+        top_p=config.top_p,
+        top_k=config.top_k,
+        min_p=config.min_p,
+        do_sample=config.do_sample,
         pad_token_id=tokenizer.pad_token_id,
     )
 
-    oracle = RegexOracle(fuzzy_match_threshold=args.fuzzy_match_threshold)
+    oracle = RegexOracle(fuzzy_match_threshold=config.fuzzy_match_threshold)
     repo = DictRepo(dirpath=CACHE_DIR)
-    samples = load_hotpotqa_dataset(split=args.dataset_split, name=args.dataset_name)
-    cache_path = f"{args.dataset_name}/{args.dataset_split}"
+    samples = load_hotpotqa_dataset(split=config.dataset_split, name=config.dataset_name)
+    cache_path = f"{config.dataset_name}/{config.dataset_split}"
 
-    output_path = Path(args.output_path)
+    output_path = Path(config.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     results = []
     unprocessed = []
     for sample in samples:
         cache_key = build_completion_cache_key(sample_query=sample.query,
-                                               system_prompt=args.system_prompt,
+                                               system_prompt=config.system_prompt,
                                                generation_config=generation_config)
         result = repo.load(path=cache_path, key=cache_key)
         if result is None:
@@ -160,16 +166,16 @@ def main(args: EvalArgs):
         results.append(result)
             
 
-    for i in range(0, len(unprocessed), args.batch_size):
-        samples = unprocessed[i:i + args.batch_size]
+    for i in range(0, len(unprocessed), config.batch_size):
+        samples = unprocessed[i:i + config.batch_size]
 
         try:
             completions = batch_sampling(samples=samples,
-                                         system_prompt=args.system_prompt,
+                                         system_prompt=config.system_prompt,
                                          model=model,
                                          tokenizer=tokenizer,
                                          generation_config=generation_config,
-                                         enable_thinking=args.enable_thinking)
+                                         enable_thinking=config.enable_thinking)
         except Exception as e:
             logging.error(f"Batch generation failed with error: {e}")
             continue
@@ -177,7 +183,7 @@ def main(args: EvalArgs):
         for sample, completion in zip(samples, completions):
             try:
                 trace = None
-                if args.enable_thinking:
+                if config.enable_thinking:
                     trace = extract_thinking_trace(completion)
 
                 oracle_result = oracle.verify(actual=completion, expected=[sample.ground_truth])
@@ -187,7 +193,7 @@ def main(args: EvalArgs):
                                               trace=trace,
                                               oracle_result=oracle_result)
                 cache_key = build_completion_cache_key(sample_query=sample.query,
-                                                       system_prompt=args.system_prompt,
+                                                       system_prompt=config.system_prompt,
                                                        generation_config=generation_config)
                 repo.save(path=cache_path, key=cache_key, data=payload)
                 results.append(payload)
@@ -200,9 +206,10 @@ def main(args: EvalArgs):
 
 
 if __name__ == "__main__":
-    args = parse_args()
+    parsed_args = parse_args()
+    config = load_config(parsed_args.config)
 
-    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
-    setup_logging(log_level)
+    level = logging.DEBUG if config.debug else logging.INFO
+    setup_logging(level=level)
 
-    main(args=args)
+    main(config=config)
