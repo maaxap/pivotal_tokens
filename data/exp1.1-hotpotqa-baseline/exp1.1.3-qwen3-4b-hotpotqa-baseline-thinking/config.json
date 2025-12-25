@@ -13,8 +13,8 @@
   "min_p": 0.0,
   "do_sample": true,
   "fuzzy_match_threshold": 0.7,
-  "output_path": "./data/exp1.1.3-qwen3-4b-hotpotqa-baseline-thinking/data/results.csv",
-  "cache_dir": "./data/exp1.1.3-qwen3-4b-hotpotqa-baseline-thinking/.cache",
+  "output_path": "./data/exp1.1-hotpotqa-baseline/exp1.1.3-qwen3-4b-hotpotqa-baseline-thinking/data/results.csv",
+  "cache_dir": "./data/exp1.1-hotpotqa-baseline/exp1.1.3-qwen3-4b-hotpotqa-baseline-thinking/.cache",
   "seed": 42,
-  "debug": true
+  "debug": false
 }
