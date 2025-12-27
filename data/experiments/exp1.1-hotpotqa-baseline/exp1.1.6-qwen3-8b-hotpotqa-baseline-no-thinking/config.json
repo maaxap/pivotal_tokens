@@ -1,5 +1,5 @@
 {
-  "model_id": "Qwen/Qwen3-4B",
+  "model_id": "Qwen/Qwen3-8B",
   "device": "cuda",
   "dataset_split": "validation",
   "dataset_name": "fullwiki",
@@ -13,8 +13,8 @@
   "min_p": 0.0,
   "do_sample": true,
   "fuzzy_match_threshold": 0.7,
-  "output_path": "./data/exp1.1.4-qwen3-4b-hotpotqa-baseline-no-thinking/data/results.csv",
-  "cache_dir": "./data/exp1.1.4-qwen3-4b-hotpotqa-baseline-no-thinking/.cache",
+  "output_path": "./data/experiments/exp1.1-hotpotqa-baseline/exp1.1.6-qwen3-8b-hotpotqa-baseline-no-thinking/data/results.csv",
+  "cache_dir": "./data/experiments/exp1.1-hotpotqa-baseline/exp1.1.6-qwen3-8b-hotpotqa-baseline-no-thinking/.cache",
   "seed": 42,
   "debug": false
 }
