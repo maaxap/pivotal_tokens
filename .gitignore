@@ -15,3 +15,4 @@ wheels/
 
 data/**/repo
 data/**/data
+data/artifacts
