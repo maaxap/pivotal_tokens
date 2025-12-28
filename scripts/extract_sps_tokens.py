@@ -124,6 +124,8 @@ def main(config: Config):
         except Exception as exc:
             logging.error(f"Extraction failed for sample {sample.id}: {exc}")
 
+        n_processed_samples += 1
+
     output_df = pd.DataFrame(accumulator)
     output_df.to_csv(output_filepath, index=False)
     logging.info(f"Saved extracted pivotal tokens to {output_filepath}.")
