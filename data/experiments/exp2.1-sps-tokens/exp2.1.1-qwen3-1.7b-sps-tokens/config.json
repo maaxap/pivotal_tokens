@@ -1,7 +1,7 @@
 {
   "traces_filepath": "./data/artifacts/exp1_1_qwen3_1_7b_traces.csv",
-  "output_filepath": "./data/experiments/exp2.1-sps-tokens-replaced-with-random/exp2.1.1-qwen3-1.7b-sps-tokens-replaced-with-random/data/pivotal_tokens.csv",
-  "repo_dirpath": "./data/experiments/exp2.1-sps-tokens-replaced-with-random/exp2.1.1-qwen3-1.7b-sps-tokens-replaced-with-random/data/repo",
+  "output_filepath": "./data/experiments/exp2.1-sps-tokens/exp2.1.1-qwen3-1.7b-sps-tokens/data/pivotal_tokens.csv",
+  "repo_dirpath": "./data/experiments/exp2.1-sps-tokens/exp2.1.1-qwen3-1.7b-sps-tokens/data/repo",
   "model_id": "Qwen/Qwen3-1.7B",
   "device": "cuda",
   "dataset_split": "validation",
