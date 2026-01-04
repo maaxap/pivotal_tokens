@@ -69,6 +69,9 @@ def select_alternatives(vocab_tuples: list[tuple[str, int, float]]) -> list[dict
 
     entries = sorted(entries, key=lambda x: x["token_logprob"], reverse=True)
 
+    logging.debug(f"Top alternative tokens: {entries[:5]}")
+    logging.debug(f"Last alternative tokens: {entries[-5:]}")
+
     picks = []
     num_top_entries = min(3, len(entries))
     for i in range(num_top_entries):
@@ -144,7 +147,8 @@ def main(config: Config):
                                                  generation_config=generation_config)
 
     records = []
-    for row in df.itertuples(index=False):
+    for idx, row in df.iterrows():
+        logging.info(f"Processing row {idx}/{len(df)}")
         user_prompt = row.query
         expected_answer = row.ground_truth
         token_ids = row.token_ids
@@ -171,6 +175,8 @@ def main(config: Config):
         if not alternatives:
             logging.warning(f"No alternative tokens found for span {row.span_id}")
             continue
+
+        logging.info(f"Found {len(alternatives)} alternative tokens for span {row.span_id}")
 
         for alt in alternatives:
             alt_token_id = int(alt["token_id"])
@@ -202,6 +208,8 @@ def main(config: Config):
                             "token_logprob_orig": token_logprob_orig,
                             "prob_after_alt": prob_after_alt,
                             "alt_type": alt["alt_type"]})
+            
+        break
 
     output_df = pd.DataFrame(records)
     output_df.to_csv(output_filepath, index=False)
