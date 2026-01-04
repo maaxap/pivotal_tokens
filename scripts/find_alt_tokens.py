@@ -208,8 +208,6 @@ def main(config: Config):
                             "token_logprob_orig": token_logprob_orig,
                             "prob_after_alt": prob_after_alt,
                             "alt_type": alt["alt_type"]})
-            
-        break
 
     output_df = pd.DataFrame(records)
     output_df.to_csv(output_filepath, index=False)
