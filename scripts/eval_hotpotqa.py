@@ -16,7 +16,7 @@ from transformers import GenerationConfig, set_seed
 
 from pivotal_tokens.hf.dataset import load_hotpotqa_dataset
 from pivotal_tokens.hf.loading import load_model, load_tokenizer
-from pivotal_tokens.hf.sampling import batch_sampling, extract_thinking_trace
+from pivotal_tokens.hf.generation import batch_sampling, extract_thinking_trace
 from pivotal_tokens.hf.dataset import Sample
 from pivotal_tokens.oracle import RegexOracle
 from pivotal_tokens.repo import DictRepo

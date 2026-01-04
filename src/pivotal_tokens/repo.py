@@ -1,3 +1,4 @@
+from ast import Not
 import json
 import typing as t
 from abc import ABC, abstractmethod
@@ -17,7 +18,7 @@ class Repo(ABC):
         pass
 
     @abstractmethod
-    def load(self, path: str, key: str) -> dict[str, t.Any] | None:
+    def load(self, path: str, key: str) -> dict[str, t.Any]:
         """
         Load dict from disk.
 
@@ -28,13 +29,27 @@ class Repo(ABC):
         """
         pass
 
+    @abstractmethod
+    def list(self, path: str) -> list[str]:
+        """
+        List all keys in the given path.
+
+        :param path: Relative path from repo root
+
+        :returns: List of keys (without .json extension)
+        """
+        pass
+
 
 class NoopRepo(Repo):
     def save(self, path: str, key: str, data: dict[str, t.Any]) -> None:
         pass
 
-    def load(self, path: str, key: str) -> dict[str, t.Any] | None:
+    def load(self, path: str, key: str) -> dict[str, t.Any]:
         raise NotImplementedError("NoopRepo does not support loading data")
+    
+    def list(self, path: str) -> list[str]:
+        raise NotImplementedError("NoopRepo does not support listing data")
 
 
 
@@ -51,12 +66,19 @@ class DictRepo(Repo):
 
         filepath.write_text(json.dumps(data, indent=2))
 
-    def load(self, path: str, key: str) -> dict[str, t.Any] | None:
+    def load(self, path: str, key: str) -> dict[str, t.Any]:
         filepath = self.dirpath / path / f"{key}.json"
         if not filepath.is_file():
-            return None
+            raise FileNotFoundError(f"File {filepath} does not exist")
 
         return json.loads(filepath.read_text())
+    
+    def list(self, path: str) -> list[str]:
+        dirpath = self.dirpath / path
+        if not dirpath.is_dir():
+            return []
+        
+        return [f.stem for f in dirpath.glob("*.json")]
     
 
 class SampleRepo(Repo):
@@ -73,8 +95,13 @@ class SampleRepo(Repo):
         prefixed_path = f"{self.sample_id}/{path}" if path else self.sample_id
         self.base_repo.save(path=prefixed_path, key=key, data=data)
 
-    def load(self, path: str, key: str) -> dict[str, t.Any] | None:
+    def load(self, path: str, key: str) -> dict[str, t.Any]:
         """Load with sample_id prefix: {sample_id}/{path}"""
         prefixed_path = f"{self.sample_id}/{path}" if path else self.sample_id
         return self.base_repo.load(path=prefixed_path, key=key)
+    
+    def list(self, path: str) -> list[str]:
+        """List with sample_id prefix: {sample_id}/{path}"""
+        prefixed_path = f"{self.sample_id}/{path}" if path else self.sample_id
+        return self.base_repo.list(path=prefixed_path)
 
