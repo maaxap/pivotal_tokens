@@ -14,7 +14,7 @@
   "num_trials": 32,
   "min_prob": 0.2,
   "max_prob": 0.8,
-  "batch_size": 16,
+  "batch_size": 32,
   "fuzzy_match_threshold": 0.7,
   "debug": true
 }
