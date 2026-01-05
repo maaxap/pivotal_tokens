@@ -11,7 +11,7 @@
   "min_p": 0.0,
   "do_sample": true,
   "prob_threshold": 0.05,
-  "num_trials": 50,
+  "num_trials": 32,
   "min_prob": 0.2,
   "max_prob": 0.8,
   "batch_size": 16,
