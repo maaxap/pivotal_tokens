@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -12,7 +13,7 @@ from pivotal_tokens.extractor import SuccessProbabilityShiftExtractor
 from pivotal_tokens.hf.generation import generate_next_token
 from pivotal_tokens.hf.loading import load_model, load_tokenizer
 from pivotal_tokens.oracle import RegexOracle
-from pivotal_tokens.repo import NoopRepo, SampleRepo
+from pivotal_tokens.repo import DictRepo, NoopRepo
 from pivotal_tokens.utils import setup_logging
 
 
@@ -20,6 +21,7 @@ from pivotal_tokens.utils import setup_logging
 class Config:
     pivotal_tokens_filepath: str = field(metadata={"help": "Path to pivotal tokens CSV."})
     output_filepath: str = field(metadata={"help": "Path to output CSV with alternatives."})
+    repo_dirpath: str = field(metadata={"help": "Path to repo directory."})
 
     model_id: str = field(metadata={"help": "Hugging Face model id to load."})
     device: str = field(metadata={"help": "Device string to force (e.g., 'cuda', 'cpu')."})
@@ -146,6 +148,9 @@ def main(config: Config):
                                                  batch_size=config.batch_size,
                                                  generation_config=generation_config)
 
+    cache_repo = DictRepo(dirpath=Path(config.repo_dirpath))
+    cache_path = "alt_tokens"
+
     records = []
     for idx, row in df.iterrows():
         logging.info(f"Processing row {idx}/{len(df)}")
@@ -180,6 +185,15 @@ def main(config: Config):
 
         for alt in alternatives:
             alt_token_id = int(alt["token_id"])
+            cache_payload = f"{row.sample_id}:{row.span_id}:{alt_token_id}"
+            cache_key = hashlib.sha256(cache_payload.encode("utf-8")).hexdigest()
+            try:
+                record = cache_repo.load(path=cache_path, key=cache_key)
+                records.append(record)
+                continue
+            except FileNotFoundError:
+                pass
+
             alt_token_logprob = float(alt["token_logprob"])
             alt_text = tokenizer.decode([alt_token_id], skip_special_tokens=False)
             alt_prefix = prefix + alt_text
@@ -191,23 +205,25 @@ def main(config: Config):
                                                                     sample_repo=NoopRepo(),
                                                                     metadata={},)
 
-            records.append({"sample_id": row.sample_id,
-                            "span_id": row.span_id,
-                            "token_ids": row.token_ids,
-                            "span_text": row.span_text,
-                            "prob_before": row.prob_before,
-                            "prob_after": row.prob_after,
-                            "prob_delta": row.prob_delta,
-                            "is_pivotal": row.is_pivotal,
-                            "pivotal_context": row.pivotal_context,
-                            "metadata": row.metadata,
-                            "prob_init": row.prob_init,
-                            "span_text_alt": alt_text,
-                            "token_ids_alt": alt_token_id,
-                            "token_logprob_alt": alt_token_logprob,
-                            "token_logprob_orig": token_logprob_orig,
-                            "prob_after_alt": prob_after_alt,
-                            "alt_type": alt["alt_type"]})
+            record = {"sample_id": row.sample_id,
+                      "span_id": row.span_id,
+                      "token_ids": row.token_ids,
+                      "span_text": row.span_text,
+                      "prob_before": row.prob_before,
+                      "prob_after": row.prob_after,
+                      "prob_delta": row.prob_delta,
+                      "is_pivotal": row.is_pivotal,
+                      "pivotal_context": row.pivotal_context,
+                      "metadata": row.metadata,
+                      "prob_init": row.prob_init,
+                      "span_text_alt": alt_text,
+                      "token_ids_alt": alt_token_id,
+                      "token_logprob_alt": alt_token_logprob,
+                      "token_logprob_orig": token_logprob_orig,
+                      "prob_after_alt": prob_after_alt,
+                      "alt_type": alt["alt_type"]}
+            cache_repo.save(path=cache_path, key=cache_key, data=record)
+            records.append(record)
 
     output_df = pd.DataFrame(records)
     output_df.to_csv(output_filepath, index=False)
