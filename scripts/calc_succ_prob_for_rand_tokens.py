@@ -236,6 +236,8 @@ def main(config: Config):
                 try:
                     record = cache_repo.load(path=cache_path, key=cache_key)
                     records.append(record)
+                    logging.debug(f"Cache hit for sample {sample_id}, token index {token_index}, "
+                                  f"alt token id {alt_token_id}, skipping computation.")
                     continue
                 except FileNotFoundError:
                     pass
