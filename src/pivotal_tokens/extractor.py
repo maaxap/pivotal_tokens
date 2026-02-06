@@ -673,6 +673,7 @@ class LogLikelihoodSpikeSpan(PivotalSpan):
     logprob: float
     nll: float
     norm_coeff: int
+    deviation: float
     is_spike: bool
     
     pivotal_context: str
@@ -690,8 +691,6 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
         :param tokenizer: Tokenizer corresponding to the model.
         :param base_repo: Base repository for saving results.
         :param spike_threshold: Threshold for identifying spike tokens (absolute deviation from mean).
-        :param min_logprob: Minimum log probability to consider (for filtering).
-        :param max_logprob: Maximum log probability to consider (for filtering).
         """
         vocab_keys = tokenizer.get_vocab().keys()
         if THINKING_START_TOKEN not in vocab_keys or THINKING_END_TOKEN not in vocab_keys:
@@ -751,8 +750,15 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
             labels = prefix_tok.input_ids.clone()
             labels[:, :t] = -100
 
-            out = self.model(**prefix_tok, labels=labels)
-            nnll = out.loss.item()
+            out = self.model(**prefix_tok)
+            shift_logits = out.logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+            nnll = torch.nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100,
+                reduction="mean",
+            ).item()
 
             token_id = prefix_ids[:, -1:]
             token = self.tokenizer.decode(token_id[0])
@@ -859,11 +865,6 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
             # Calculate deviation from mean
             deviation = abs(logprob - mean_logprob)
             is_spike = deviation >= self.spike_threshold * std_logprob
-
-            # Filter by logprob range if specified
-            if logprob < self.min_logprob or logprob > self.max_logprob:
-                logging.debug(f"Skipping token '{token}' with logprob {logprob:.4f} outside range")
-                continue
 
             logging.debug(f"Token '{token}': logprob={logprob:.4f}, deviation={deviation:.4f}, "
                          f"is_spike={is_spike}")
