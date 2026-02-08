@@ -671,10 +671,8 @@ class SuccessProbabilityShiftSentenceExtractor(SuccessProbabilityShiftExtractor)
 @dataclass
 class LogLikelihoodSpikeSpan(PivotalSpan):
     logprob: float
-    nll: float
+    nnll: float
     norm_coeff: int
-    deviation: float
-    is_spike: bool
     
     pivotal_context: str
     
@@ -685,6 +683,7 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
     def __init__(self,
                  model: PreTrainedModel,
                  tokenizer: PreTrainedTokenizer,
+                 mode: t.Literal["expected_answer", "actual_answer"],
                  base_repo: Repo):
         """
         :param model: Pre-trained model for computing log-likelihoods.
@@ -698,6 +697,7 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
                              f"{THINKING_END_TOKEN}")
 
         self.model = model
+        self.mode = mode
         self.tokenizer = tokenizer
         self.base_repo = base_repo
 
@@ -727,55 +727,83 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
 
         self.model.eval()
 
-        prompt_tok = self.tokenizer(context, return_tensors="pt")
-        prompt_tok = {k: v.to(self.model.device) for k, v in prompt_tok.items()}
+        if not completion.startswith(THINKING_START_TOKEN):
+            raise ValueError(f"Compltion must start from the '{THINKING_START_TOKEN}' token, got: {completion}")
 
-        _, prompt_length = prompt_tok.input_ids.shape
-        if prompt_length < 2:
-            raise ValueError("Need at least 2 tokens to score next-token log-probs in the prompt.")
+        completion_tok = self.tokenizer(completion, return_tensors="pt").to(self.model.device)
+
+        completion_len = completion_tok.input_ids.shape[1]
+
+        # Completion length without thinking start token
+        if completion_len < 2:
+            raise ValueError(f"Required at least one token after '{THINKING_START_TOKEN}' in the thinking trace, got: {completion}")
 
         full_text = context + completion
-        full_tok = self.tokenizer(full_text, return_tensors="pt", return_attention_mask=False)
+        full_tok = self.tokenizer(full_text, return_tensors="pt", return_attention_mask=False).to(self.model.device)
 
-        indices = range(prompt_tok.input_ids.shape[1], full_tok.input_ids.shape[1])
+        # Indices start from the <thinking> token in order to get nnll of the "no thinking" scenario.
+        # Specifically, the case "... <thinking> </thinking> ..." 
+        completion_start_idx = full_tok.input_ids.shape[1] - completion_len + 1
+        completion_end_idx = full_tok.input_ids.shape[1] + 1
+        indices = list(range(completion_start_idx, completion_end_idx))
+
+        past_key_values = None
+        prev_t = 0
+        last_prefix_logits = None
         for t in indices:
+            new_tokens = full_tok.input_ids[:, prev_t:t]
+            if past_key_values is None:
+                out_prefix = self.model(input_ids=new_tokens, use_cache=True)
+            else:
+                out_prefix = self.model(input_ids=new_tokens,
+                                        use_cache=True,
+                                        past_key_values=past_key_values)
+            past_key_values = out_prefix.past_key_values
+            prev_t = t
+
             prefix_ids = full_tok.input_ids[:, :t]
-
             prefix_str = self.tokenizer.decode(prefix_ids[0], skip_special_tokens=False)
-            prefix_str += answer_suffix
+            conditional_context = prefix_str + answer_suffix
 
-            prefix_tok = self.tokenizer(prefix_str, return_tensors="pt")
-            prefix_tok = {k: v.to(self.model.device) for k, v in prefix_tok.items()}
+            conditional_context_tok = self.tokenizer(conditional_context, return_tensors="pt").to(self.model.device)
 
-            labels = prefix_tok.input_ids.clone()
-            labels[:, :t] = -100
+            suffix_ids = conditional_context_tok.input_ids[:, t:]
+            norm_coeff = suffix_ids.numel()
 
-            out = self.model(**prefix_tok)
-            shift_logits = out.logits[:, :-1, :].contiguous()
-            shift_labels = labels[:, 1:].contiguous()
+            suffix_input = suffix_ids[:, :-1]
+            out_suffix = self.model(input_ids=suffix_input,
+                                    use_cache=False,
+                                    past_key_values=past_key_values)
+            
+            prev_last_prefix_logits = last_prefix_logits
+            last_prefix_logits = out_prefix.logits[:, -1, :]
+            logits_for_loss = torch.cat([last_prefix_logits.unsqueeze(1),
+                                         out_suffix.logits],
+                                        dim=1)
             nnll = torch.nn.functional.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                ignore_index=-100,
+                input=logits_for_loss.reshape(-1, logits_for_loss.size(-1)),
+                target=suffix_ids.reshape(-1),
                 reduction="mean",
             ).item()
 
             token_id = prefix_ids[:, -1:]
             token = self.tokenizer.decode(token_id[0])
-
-            logits = out.logits[:, t-1:t, :][0].detach()
-            all_token_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-            token_prob = all_token_probs.gather(-1, token_id.to(self.model.device).T).squeeze(-1).item()
-
-            norm_coeff = (labels != -100).sum().item()
+            
+            # Get logprob of the `t` token by shifting logprobs by -1
+            if prev_last_prefix_logits is None:
+                logits = out_prefix.logits[:, -2, :]
+            else:
+                logits = prev_last_prefix_logits
+            all_token_logprobs = torch.nn.functional.log_softmax(logits, dim=-1)
+            token_logprob = all_token_logprobs.gather(-1, token_id).squeeze(-1).item()
 
             tokens.append({
                 'idx': t,
                 'token_id': token_id[0].item(),
                 'token': token,
-                'nll': nnll,
+                'nnll': nnll,
                 'norm_coeff': norm_coeff,
-                'logprob': token_prob
+                'logprob': token_logprob
             })
 
         return tokens
@@ -802,10 +830,19 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
         :param metadata: Additional metadata (e.g., dataset name, difficulty).
         :return: List of extracted spike spans with log-likelihood statistics.
         """
-        del expected_answer  # Not used in this extractor
+        answer = expected_answer if self.mode == "expected_answer" else actual_answer
+        metadata = metadata or {}
 
         if reasoning_trace.strip() == "":
             raise ValueError("Reasoning trace is empty")
+    
+        if reasoning_trace.endswith(THINKING_END_TOKEN):
+            raise ValueError(f"Reasoning trace must not end with '{THINKING_END_TOKEN}'")
+
+        
+        if not reasoning_trace.startswith(THINKING_START_TOKEN):
+            logging.debug(f"Appending missing '{THINKING_START_TOKEN}' to the reasoning trace")
+            reasoning_trace = f"{THINKING_START_TOKEN}\n{reasoning_trace}"
 
         logging.debug(f"Starting log-likelihood spike extraction for sample {sample_id}")
 
@@ -820,21 +857,19 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
             "reasoning_trace": reasoning_trace,
+            "expected_answer": expected_answer,
             "actual_answer": actual_answer,
             "additional_metadata": metadata,
+            "mode": self.mode,
             "created_at": datetime.now().isoformat()
         }
 
         logging.debug(f"Saving sample metadata for sample ID: {sample_id}")
         sample_repo.save(path="", key="metadata", data=sample_metadata)
 
-        if not reasoning_trace.startswith(THINKING_START_TOKEN):
-            logging.debug(f"Appending missing '{THINKING_START_TOKEN}' to the reasoning trace")
-            reasoning_trace = f"{THINKING_START_TOKEN}\n{reasoning_trace}"
-
         # Create context and answer suffix
         context = self.create_context(system_prompt=system_prompt, user_prompt=user_prompt)
-        answer_suffix = f"\n{THINKING_END_TOKEN}\n{actual_answer}"
+        answer_suffix = f"\n{THINKING_END_TOKEN}\n{answer}"
 
         # Calculate log-likelihood for each token
         logging.debug("Calculating log-likelihoods for all tokens")
@@ -848,32 +883,17 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
             logging.warning("No tokens found in reasoning trace")
             return []
 
-        # Calculate mean and std of log probabilities for spike detection
-        logprobs = [t['logprob'] for t in token_stats]
-        mean_logprob = sum(logprobs) / len(logprobs)
-        variance = sum((lp - mean_logprob) ** 2 for lp in logprobs) / len(logprobs)
-        std_logprob = variance ** 0.5
-
-        logging.debug(f"Log-probability statistics: mean={mean_logprob:.4f}, std={std_logprob:.4f}")
-
         # Extract spike spans
         pivotal_spans = []
         for token_stat in token_stats:
             token = token_stat['token']
             logprob = token_stat['logprob']
             
-            # Calculate deviation from mean
-            deviation = abs(logprob - mean_logprob)
-            is_spike = deviation >= self.spike_threshold * std_logprob
-
-            logging.debug(f"Token '{token}': logprob={logprob:.4f}, deviation={deviation:.4f}, "
-                         f"is_spike={is_spike}")
-
             span_id = generate_unique_id()
             
             # Reconstruct context up to this token
             idx = token_stat['idx']
-            prefix_ids = self.tokenizer.encode(context + reasoning_trace, add_special_tokens=False)[:idx]
+            prefix_ids = self.tokenizer.encode(context + reasoning_trace, add_special_tokens=False)[:idx-1]
             pivotal_context = self.tokenizer.decode(prefix_ids, skip_special_tokens=False)
 
             spike_span = LogLikelihoodSpikeSpan(
@@ -882,28 +902,20 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
                 token_ids=[token_stat['token_id']],
                 span_text=token,
                 logprob=logprob,
-                nll=token_stat['nll'],
+                nnll=token_stat['nnll'],
                 norm_coeff=token_stat['norm_coeff'],
-                is_spike=is_spike,
                 pivotal_context=pivotal_context,
                 metadata={
-                    **(metadata or {}),
-                    'mean_logprob': mean_logprob,
-                    'std_logprob': std_logprob,
-                    'deviation': deviation,
-                    'idx': idx
+                    'idx': idx,
+                    **metadata,
                 }
             )
 
             span_dump_data = asdict(spike_span)
             sample_repo.save(path="spans", key=span_id, data=span_dump_data)
 
-            if is_spike:
-                logging.debug(f"Identified spike span: '{token}' with logprob {logprob:.4f}")
-
             pivotal_spans.append(spike_span)
 
-        logging.debug(f"Extracted {len(pivotal_spans)} spans, "
-                     f"{sum(1 for s in pivotal_spans if s.is_spike)} are spikes")
+        logging.debug(f"Extracted {len(pivotal_spans)} spans")
 
         return pivotal_spans
