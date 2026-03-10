@@ -96,6 +96,33 @@ print(
 )
 
 # %%
+
+end_of_sentence_mask = df["span_text"].str.strip().str.fullmatch(r"[.;?!:]+", na=False)
+span_type_counts = (
+    pd.Series(
+        np.where(end_of_sentence_mask, "End-of-sentence punctuation", "Other tokens"),
+        name="token_type",
+    )
+    .value_counts()
+    .rename_axis("token_type")
+    .reset_index(name="count")
+)
+span_type_counts["token_type"] = pd.Categorical(
+    span_type_counts["token_type"],
+    categories=["End-of-sentence punctuation", "Other tokens"],
+    ordered=True,
+)
+span_type_counts = span_type_counts.sort_values("token_type")
+
+bar_span_type = px.bar(
+    span_type_counts,
+    x="token_type",
+    y="count",
+    title="Counts of end-of-sentence punctuation vs other pivotal tokens",
+)
+bar_span_type.update_layout(xaxis_title="Token type", yaxis_title="Count")
+
+# %%
 sample_probs = df[["sample_id", "prob_init"]].drop_duplicates("sample_id")
 hist_init = px.histogram(
     sample_probs,
