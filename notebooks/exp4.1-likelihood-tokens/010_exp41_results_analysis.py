@@ -14,7 +14,8 @@ from plotly.subplots import make_subplots
 from IPython.display import HTML, display
 from transformers import PreTrainedTokenizer
 
-EXP41_DIR = get_data_dir() / "experiments" / "exp4.1-likelihood-tokens" / "exp4.1.1-qwen3-1.7b-likelihood-tokens"
+# EXP41_DIR = get_data_dir() / "experiments" / "exp4.1-likelihood-tokens" / "exp4.1.1-qwen3-1.7b-likelihood-tokens"
+EXP41_DIR = get_data_dir() / "experiments" / "exp4.1-likelihood-tokens" / "exp4.1.2-qwen3-1.7b-likelihood-tokens-trunc"
 EXP41_RESULTS_FILE = EXP41_DIR / "data" / "loglikelihood_pivotal_tokens.csv"
 
 EXP22_DIR = get_data_dir() / "experiments" / "exp2.2-alt-tokens-on-pivotal-positions" / "exp2.2.1-qwen3-1.7b-alt-tokens-on-pivotal-positions"
@@ -68,7 +69,7 @@ QWEN3_1_7B_MODEL_ID = 'Qwen/Qwen3-1.7B'
 # df = df.drop(columns=['pivotal_context'])
 # df = df.drop(columns=['trace', 'metadata', 'partial_trace'])
 
-# df.to_csv("data/preprocessed.csv", index=False)
+# df.to_csv("data/preprocessed-trunc.csv", index=False)
 
 # %%
 
@@ -83,7 +84,8 @@ def parse_token_ids(value: object) -> list[int]:
     return []
 
 
-PREPROCESSED_FILE = Path("data/preprocessed.csv")
+# PREPROCESSED_FILE = Path("data/preprocessed.csv")
+PREPROCESSED_FILE = Path("data/preprocessed-trunc.csv")
 if PREPROCESSED_FILE.exists():
     prep_df = pd.read_csv(PREPROCESSED_FILE)
     prep_df["token_ids"] = prep_df["token_ids"].apply(parse_token_ids)

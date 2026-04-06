@@ -29,7 +29,9 @@ class Config:
 
     mode: t.Literal["expected_answer", "actual_answer"] = field(metadata={"help": "Answer mode."})
 
-    debug: bool = field(metadata={"help": "Whether to run in debug mode."})
+    explicit_truncation: bool = field(metadata={"help": "Whether to finish reasoning trace with <truncated> to explicitly indicate truncation."}, default=False)
+
+    debug: bool = field(default=False, metadata={"help": "Whether to run in debug mode."})
 
 
 def load_config(path: Path) -> Config:
@@ -67,7 +69,8 @@ def main(config: Config):
     extractor = LogLikelihoodSpikeExtractor(model=model,
                                             tokenizer=tokenizer,
                                             mode=config.mode,
-                                            base_repo=base_repo)
+                                            base_repo=base_repo,
+                                            explicit_truncation=config.explicit_truncation)
 
     accumulator = []
     for idx, sample in enumerate(samples, start=1):

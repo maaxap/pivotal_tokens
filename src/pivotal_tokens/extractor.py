@@ -666,6 +666,9 @@ class SuccessProbabilityShiftSentenceExtractor(SuccessProbabilityShiftExtractor)
             current_prefix += span_text
 
         return pivotal_spans
+    
+
+TRUNCATED_TAG = "<truncated>"
 
 
 @dataclass
@@ -684,7 +687,8 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
                  model: PreTrainedModel,
                  tokenizer: PreTrainedTokenizer,
                  mode: t.Literal["expected_answer", "actual_answer"],
-                 base_repo: Repo):
+                 base_repo: Repo,
+                 explicit_truncation: bool = False):
         """
         :param model: Pre-trained model for computing log-likelihoods.
         :param tokenizer: Tokenizer corresponding to the model.
@@ -700,6 +704,7 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
         self.mode = mode
         self.tokenizer = tokenizer
         self.base_repo = base_repo
+        self.explicit_truncation = explicit_truncation
 
     def create_context(self, system_prompt: str, user_prompt: str) -> str:
         prompts = [{"role": "system", "content": system_prompt},
@@ -714,7 +719,7 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
     def calc_loglikelihood_per_token(self,
                                      context: str,
                                      completion: str,
-                                     answer_suffix: str) -> list[dict]:
+                                     ground_truth: str) -> list[dict]:
         """
         Calculate log-likelihood for each token in the completion.
         
@@ -747,6 +752,9 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
         completion_end_idx = full_tok.input_ids.shape[1] + 1
         indices = list(range(completion_start_idx, completion_end_idx))
 
+        n_ground_truth_tokens = len(self.tokenizer.encode(ground_truth))
+    
+        last_trace_token_idx = indices[-1]
         past_key_values = None
         prev_t = 0
         last_prefix_logits = None
@@ -763,12 +771,16 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
 
             prefix_ids = full_tok.input_ids[:, :t]
             prefix_str = self.tokenizer.decode(prefix_ids[0], skip_special_tokens=False)
-            conditional_context = prefix_str + answer_suffix
 
+            # Example: "... some reasoning<truncated>\n</think>\nAnswer: `<answer>`"
+            answer_suffix = f"\n{THINKING_END_TOKEN}\nAnswer: `"
+            if self.explicit_truncation and (t != last_trace_token_idx):
+                answer_suffix = TRUNCATED_TAG + answer_suffix
+
+            conditional_context = prefix_str + answer_suffix + ground_truth + "`"
             conditional_context_tok = self.tokenizer(conditional_context, return_tensors="pt").to(self.model.device)
 
             suffix_ids = conditional_context_tok.input_ids[:, t:]
-            norm_coeff = suffix_ids.numel()
 
             suffix_input = suffix_ids[:, :-1]
             out_suffix = self.model(input_ids=suffix_input,
@@ -780,9 +792,14 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
             logits_for_loss = torch.cat([last_prefix_logits.unsqueeze(1),
                                          out_suffix.logits],
                                         dim=1)
+            
+            target = suffix_ids.reshape(-1)
+            target[:-(n_ground_truth_tokens + 1)] = -100
+            target[-1] = -100
+        
             nnll = torch.nn.functional.cross_entropy(
                 input=logits_for_loss.reshape(-1, logits_for_loss.size(-1)),
-                target=suffix_ids.reshape(-1),
+                target=target,
                 reduction="mean",
             ).item()
 
@@ -802,7 +819,7 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
                 'token_id': token_id[0].item(),
                 'token': token,
                 'nnll': nnll,
-                'norm_coeff': norm_coeff,
+                'norm_coeff': n_ground_truth_tokens,
                 'logprob': token_logprob
             })
 
@@ -869,14 +886,13 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
 
         # Create context and answer suffix
         context = self.create_context(system_prompt=system_prompt, user_prompt=user_prompt)
-        answer_suffix = f"\n{THINKING_END_TOKEN}\n{answer}"
 
         # Calculate log-likelihood for each token
         logging.debug("Calculating log-likelihoods for all tokens")
         token_stats = self.calc_loglikelihood_per_token(
             context=context,
             completion=reasoning_trace,
-            answer_suffix=answer_suffix
+            ground_truth=answer
         )
 
         if not token_stats:
