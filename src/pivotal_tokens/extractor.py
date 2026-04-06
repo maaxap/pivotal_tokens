@@ -1,3 +1,4 @@
+import copy
 import logging
 import re
 import typing as t
@@ -725,7 +726,7 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
         
         :param context: Context string (prompt + thinking start token).
         :param completion: Completion string (reasoning trace).
-        :param answer_suffix: Answer suffix to append after each prefix.
+        :param ground_truth: Ground truth answer.
         :return: List of dicts with token statistics.
         """
         tokens = []
@@ -754,7 +755,6 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
 
         n_ground_truth_tokens = len(self.tokenizer.encode(ground_truth))
     
-        last_trace_token_idx = indices[-1]
         past_key_values = None
         prev_t = 0
         last_prefix_logits = None
@@ -763,29 +763,39 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
             if past_key_values is None:
                 out_prefix = self.model(input_ids=new_tokens, use_cache=True)
             else:
+                past_length = past_key_values[0][0].shape[2]
+                seq_len = new_tokens.shape[1]
+                total_len = past_length + seq_len
+
+                position_ids = torch.arange(past_length, total_len, device=self.model.device).unsqueeze(0)
+                attention_mask = torch.ones(1, total_len, device=self.model.device, dtype=torch.long)
+
                 out_prefix = self.model(input_ids=new_tokens,
-                                        use_cache=True,
-                                        past_key_values=past_key_values)
+                                        past_key_values=past_key_values,
+                                        position_ids=position_ids,
+                                        attention_mask=attention_mask,
+                                        use_cache=True)
+
             past_key_values = out_prefix.past_key_values
             prev_t = t
 
             prefix_ids = full_tok.input_ids[:, :t]
             prefix_str = self.tokenizer.decode(prefix_ids[0], skip_special_tokens=False)
 
-            # Example: "... some reasoning<truncated>\n</think>\nAnswer: `<answer>`"
-            answer_suffix = f"\n{THINKING_END_TOKEN}\nAnswer: `"
-            if self.explicit_truncation and (t != last_trace_token_idx):
-                answer_suffix = TRUNCATED_TAG + answer_suffix
+            answer_prefix = f"\n{THINKING_END_TOKEN}\nAnswer: `"
+            if self.explicit_truncation:
+                answer_prefix = TRUNCATED_TAG + answer_prefix
 
-            conditional_context = prefix_str + answer_suffix + ground_truth + "`"
+            # Example: "<reasoning trace ... <truncated>\n</think>\nAnswer: `<answer>`"
+            conditional_context = prefix_str + answer_prefix + ground_truth + "`"
             conditional_context_tok = self.tokenizer(conditional_context, return_tensors="pt").to(self.model.device)
 
             suffix_ids = conditional_context_tok.input_ids[:, t:]
-
             suffix_input = suffix_ids[:, :-1]
+
             out_suffix = self.model(input_ids=suffix_input,
                                     use_cache=False,
-                                    past_key_values=past_key_values)
+                                    past_key_values=copy.deepcopy(past_key_values))
             
             prev_last_prefix_logits = last_prefix_logits
             last_prefix_logits = out_prefix.logits[:, -1, :]
@@ -793,7 +803,8 @@ class LogLikelihoodSpikeExtractor(PivotalSpanExtractor):
                                          out_suffix.logits],
                                         dim=1)
             
-            target = suffix_ids.reshape(-1)
+            target = suffix_ids.reshape(-1).clone()
+            # +1 is needed to set -100 label for ending "`"
             target[:-(n_ground_truth_tokens + 1)] = -100
             target[-1] = -100
         
