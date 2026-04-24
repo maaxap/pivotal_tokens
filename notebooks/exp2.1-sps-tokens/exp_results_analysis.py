@@ -97,6 +97,9 @@ print(
 
 # %%
 
+df[df['sample_id'] == '5ab6f0c25542995eadef00ea'].head(10)
+# %%
+
 end_of_sentence_mask = df["span_text"].str.strip().str.fullmatch(r"[.;?!:]+", na=False)
 span_type_counts = (
     pd.Series(
